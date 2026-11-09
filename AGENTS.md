@@ -61,6 +61,7 @@ pnpm typecheck        # 类型检查
 pnpm test             # 单测
 pnpm stage            # 只重做 stage/ 产物
 node scripts/e2e-probe.mjs <工作区> <sessionId|new> "任务内容"   # 端到端联调
+node scripts/daemon-lifecycle-probe.mjs <工作区>                 # 验调度器扛得住会话回收
 ```
 
 装到 ZCode（CLI 与桌面端用同一份配置）：
@@ -80,3 +81,10 @@ node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --sc
 - 行文不用破折号「——」。
 - 公开仓对外不提及内部项目名。
 - 改动 `src/protocol/` 时先对照官方源码：`zai-org/ZCode`（本机检出路径见 README）。
+
+## 踩过的坑（宿主行为，改代码前先看这里）
+
+- **插件 MCP server 只在会话创建时并进运行时配置**。先开会话、后装插件（或重装插件），那个会话里就没有本插件的 MCP server，面板直接报 `MCP App connection is unavailable`。宿主不会自动刷新已开会话的 MCP 配置，只能重建会话运行时（应用头部「重新加载会话」，或重新打开该会话）。
+- **宿主回收会话级 MCP server 时按 PPID 树杀整棵子树**（SIGINT → SIGTERM → SIGKILL，见官方 `apps/zcode-cli/packages/adapters/src/mcp/process-tree.ts`）。调度器必须用两次 fork 脱离这棵树，否则会话一关，夜里就没人干活了。
+- **第三方插件声明的 `isolation` 会被忽略**（官方源才认），插件 MCP server 一律会话级；最后一个租约释放 30 秒后连接关闭、子进程被杀。
+- **面板只能开在会话侧栏**，`availability` 只接受 `session`；页面没有任何会话 API，切不了也建不了宿主会话。

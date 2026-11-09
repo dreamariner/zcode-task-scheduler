@@ -53,6 +53,11 @@ export class DaemonClient {
     });
   }
 
+  /** 连接是否还在。调度器崩了或空闲自退后，这个值会变成 false。 */
+  get connected(): boolean {
+    return this.socket !== null;
+  }
+
   async close(): Promise<void> {
     this.socket?.destroy();
     this.socket = null;
@@ -108,13 +113,16 @@ export class DaemonClient {
     if (!existsSync(entry)) {
       throw new Error(`找不到 daemon 入口：${entry}`);
     }
+    // 以 launcher 角色启动：入口脚本会再 fork 一次真正的调度器并立刻退出，
+    // 让调度器的父进程变成 init。宿主回收会话级 MCP server 时按 PPID 树清理子树，
+    // 直接挂载会让调度器跟着一起死。
     const child = spawn(process.execPath, [entry], {
       detached: true,
       stdio: "ignore",
-      env,
+      env: { ...env, ZCODE_DAEMON_ROLE: "launcher" },
     });
     child.unref();
-    this.log(`尝试拉起 daemon，pid=${child.pid}（若已有实例在跑，这个进程会自行退出）`);
+    this.log(`尝试拉起 daemon（launcher pid=${child.pid}，若已有实例在跑这个进程会自行退出）`);
   }
 
   private openSocket(): Promise<void> {

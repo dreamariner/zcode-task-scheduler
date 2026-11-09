@@ -36,7 +36,9 @@ node "$CLI" plugins marketplace update zcode-task-scheduler-local
 node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --scope user
 ```
 
-装好后打开面板：**设置 → 插件 → 夜间任务调度 → 打开**，或在会话侧栏找到「夜间调度」标签页。
+装好后打开面板：**设置 → 插件 → 夜间调度 → 打开**，或在会话侧栏找到「夜间调度」标签页。
+
+> **重要**：插件的 MCP server 是在**会话创建时**被并进该会话的运行时配置的。先开会话、后装插件，这个会话里就没有本插件的 MCP server，面板会报 `MCP App connection is unavailable`。重装插件后，**已经开着的会话都要重载一次**（应用头部「重新加载会话」，或从侧栏重新打开该会话）才能用面板；新建的会话直接可用。
 
 ## 用法
 
@@ -54,7 +56,8 @@ node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --sc
 ## 行为说明
 
 - **插件面板只能开在当前会话的侧栏**，这是宿主给的唯一落点；Web、手机、远程工作区不支持。
-- **调度器是独立进程**，不依赖桌面端开着；关掉 ZCode 也不影响当夜任务（进程本身仍在）。跨重启存活需要额外装 launchd。
+- **调度器是独立进程**，不依赖桌面端开着；关掉 ZCode 也不影响当夜任务。跨重启存活需要额外装 launchd。
+- **调度器用两次 fork 脱离会话进程树**：宿主回收会话级 MCP server 时会按 PPID 树把整棵子树干掉（SIGINT → SIGTERM → SIGKILL），调度器若挂在 MCP server 下面会被一起收掉，所以它先经一个中转进程起、自己被 init 收养（PPID 变成 1）后再干活。实测：关掉会话、等宿主回收完，调度器仍活着。
 - **调度器随插件加载启动**，队列空且半小时无活动时自行退出，下次打开插件会再拉起来。
 - **错过窗口**：超过 24 小时仍未执行的任务会被跳过，不会补跑。
 - **上下文成本**：派到长会话上，首轮消耗会非常大（实测 39 万 token）；派到专用会话只要 2.5 万。
@@ -66,6 +69,7 @@ node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --sc
 pnpm typecheck
 pnpm test
 node scripts/e2e-probe.mjs /path/to/workspace <sessionId|new> "任务内容"
+node scripts/daemon-lifecycle-probe.mjs /path/to/workspace   # 验调度器能否扛住会话回收
 ```
 
 改动协议相关代码时，先对照官方源码 `zai-org/ZCode`（本机检出路径自行替换）。

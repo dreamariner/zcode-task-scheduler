@@ -48,21 +48,32 @@ export async function main(): Promise<void> {
   );
 
   let daemon: DaemonClient | null = null;
-  let daemonFailure: string | null = null;
+  // 连接过程要合并：插件加载时会主动拉一次调度器，紧接着的第一个工具调用也会拉一次，
+  // 不合并就会起两个 daemon，多出来的那个抢不到 pidfile 锁，白跑一轮。
+  let daemonPending: Promise<DaemonClient> | null = null;
 
   const getDaemon = async (): Promise<DaemonClient> => {
-    if (daemon) return daemon;
-    try {
-      daemon = await DaemonClient.connect({
-        env: process.env,
-        log: (message) => process.stderr.write(`[${SERVER_NAME}] ${message}\n`),
-      });
-      daemonFailure = null;
-      return daemon;
-    } catch (error) {
-      daemonFailure = error instanceof Error ? error.message : String(error);
-      throw error;
+    // 调度器是独立进程：它崩了或空闲自退之后，这边缓存的连接就是死的。
+    // 不丢掉重连，面板会一直报「daemon 连接未建立」，直到整个会话重建。
+    if (daemon && !daemon.connected) {
+      daemon = null;
+      daemonPending = null;
     }
+    if (daemon) return daemon;
+    if (daemonPending) return daemonPending;
+    daemonPending = DaemonClient.connect({
+      env: process.env,
+      log: (message) => process.stderr.write(`[${SERVER_NAME}] ${message}\n`),
+    })
+      .then((client) => {
+        daemon = client;
+        return client;
+      })
+      .catch((error: unknown) => {
+        daemonPending = null;
+        throw error;
+      });
+    return daemonPending;
   };
 
   const call = async <T = unknown>(
@@ -370,8 +381,4 @@ export async function main(): Promise<void> {
     const message = error instanceof Error ? error.message : String(error);
     process.stderr.write(`[${SERVER_NAME}] 调度器启动失败：${message}\n`);
   });
-
-  if (daemonFailure) {
-    process.stderr.write(`[${SERVER_NAME}] 初始连接失败：${daemonFailure}\n`);
-  }
 }

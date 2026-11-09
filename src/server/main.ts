@@ -340,6 +340,23 @@ export async function main(): Promise<void> {
   );
 
   server.registerTool(
+    "move_job",
+    {
+      description: "调整任务在面板里的执行顺序。同一会话的多个任务按这个顺序排队执行，不并发。",
+      inputSchema: {
+        jobId: z.string().min(1),
+        direction: z.enum(["up", "down"]).describe("up 上移一位，down 下移一位"),
+      },
+      // 调顺序是面板偏好，模型侧不需要。
+      _meta: toolUi(["app"]),
+    },
+    async (input) => {
+      const result = await call<{ jobs: unknown[] }>("move_job", input);
+      return textResult("任务顺序已更新", { jobs: result.jobs });
+    },
+  );
+
+  server.registerTool(
     "daemon_status",
     {
       description: "查看调度器进程的运行状态（是否活着、CLI 来源、正在执行的任务）。",

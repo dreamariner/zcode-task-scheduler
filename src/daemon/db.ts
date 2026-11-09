@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS jobs (
   last_error TEXT,
   consecutive_failures INTEGER NOT NULL DEFAULT 0,
   bound_session_id TEXT,
+  sort_order INTEGER NOT NULL DEFAULT 0,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -96,7 +97,23 @@ export function openDatabase(file: string): DatabaseSync {
   execWithRetry(db, "PRAGMA journal_mode=WAL");
   db.exec("PRAGMA foreign_keys=ON");
   execWithRetry(db, DDL);
+  migrate(db);
   return db;
+}
+
+/** 轻量迁移：旧库缺列就补，别让用户删库重建。 */
+function migrate(db: DatabaseSync): void {
+  const columns = new Set(
+    (db.prepare("PRAGMA table_info(jobs)").all() as { name: string }[]).map((column) => column.name),
+  );
+  if (columns.size === 0 || columns.has("sort_order")) return;
+  execWithRetry(db, "ALTER TABLE jobs ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0");
+  // 既有任务按创建顺序编号，避免全是 0 时排序歧义。
+  const rows = db.prepare("SELECT id FROM jobs ORDER BY created_at ASC, id ASC").all() as {
+    id: string;
+  }[];
+  const update = db.prepare("UPDATE jobs SET sort_order = ? WHERE id = ?");
+  rows.forEach((row, index) => update.run(index, row.id));
 }
 
 /** 认领结果：dueAt 是被认领那一刻的计划时刻，调度器靠它判断错过窗口。 */
@@ -192,10 +209,9 @@ export class JobStore {
   constructor(private readonly db: DatabaseSync) {}
 
   listJobs(): Job[] {
-    const rows = this.db.prepare("SELECT * FROM jobs ORDER BY created_at ASC").all() as Record<
-      string,
-      unknown
-    >[];
+    const rows = this.db
+      .prepare("SELECT * FROM jobs ORDER BY sort_order ASC, created_at ASC, id ASC")
+      .all() as Record<string, unknown>[];
     return rows.map(rowToJob);
   }
 
@@ -209,6 +225,11 @@ export class JobStore {
   addJob(input: JobInput, id: string, now: number): Job {
     const schedule = scheduleColumns(input.schedule);
     const firstRun = nextRunAt(input.schedule, now);
+    // 新任务排到队尾：面板里可以再上下调整。
+    const maxOrder = this.db.prepare("SELECT COALESCE(MAX(sort_order), -1) AS max FROM jobs").get() as
+      | Record<string, unknown>
+      | undefined;
+    const sortOrder = Number(maxOrder?.max ?? -1) + 1;
     this.db
       .prepare(
         `INSERT INTO jobs (
@@ -216,8 +237,8 @@ export class JobStore {
            prompt, workspace_path, workspace_identity,
            schedule_kind, schedule_run_at, schedule_time_of_day, schedule_weekdays,
            enabled, max_attempts, next_run_at, last_status, last_run_at, last_error,
-           consecutive_failures, bound_session_id, created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           consecutive_failures, bound_session_id, sort_order, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -241,6 +262,7 @@ export class JobStore {
         null,
         0,
         null,
+        sortOrder,
         now,
         now,
       );
@@ -301,13 +323,34 @@ export class JobStore {
     return Number(result.changes) > 0;
   }
 
+  /**
+   * 上移/下移一个任务的执行顺序。
+   *
+   * 实现是整表重排：把当前顺序取出来，交换相邻位置后重新连续编号。
+   * 任务量级很小，整表重排最不容易出排序歧义（比如历史数据 sort_order 全相同）。
+   */
+  moveJob(id: string, direction: "up" | "down"): Job[] {
+    const jobs = this.listJobs();
+    const index = jobs.findIndex((job) => job.id === id);
+    if (index < 0) return jobs;
+    const target = direction === "up" ? index - 1 : index + 1;
+    if (target < 0 || target >= jobs.length) return jobs;
+    const reordered = [...jobs];
+    const [moved] = reordered.splice(index, 1);
+    reordered.splice(target, 0, moved as Job);
+    const update = this.db.prepare("UPDATE jobs SET sort_order = ? WHERE id = ?");
+    reordered.forEach((job, order) => update.run(order, job.id));
+    return this.listJobs();
+  }
+
   /** 认领结果：job 是清空 next_run_at 之后的最新快照，dueAt 是被认领时的计划时刻。 */
   claimDue(now: number): ClaimedJob[] {
     const rows = this.db
       .prepare(
         `SELECT * FROM jobs
          WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ?
-           AND last_status IS NOT 'running'`,
+           AND last_status IS NOT 'running'
+         ORDER BY sort_order ASC, created_at ASC, id ASC`,
       )
       .all(now) as Record<string, unknown>[];
     const claimed: ClaimedJob[] = [];

@@ -357,6 +357,14 @@ function App_(): JSX.Element {
     [withBusy, settings],
   );
 
+  /** 调整任务执行顺序；同一会话的任务按这个顺序排队执行。 */
+  const moveJob = useCallback(
+    (jobId: string, direction: "up" | "down") => {
+      void withBusy(() => callTool("move_job", { jobId, direction }));
+    },
+    [withBusy],
+  );
+
   const sessionOptions = useMemo(
     () =>
       sessions.map((session) => ({
@@ -387,11 +395,12 @@ function App_(): JSX.Element {
 
       <section className="block">
         <h2>任务清单</h2>
+        <p className="hint">同一会话的任务按下面顺序排队执行，不并发；用箭头调整顺序。</p>
         {jobs.length === 0 ? (
           <p className="empty">还没有登记任务。</p>
         ) : (
           <ul className="jobs">
-            {jobs.map((job) => (
+            {jobs.map((job, index) => (
               <li key={job.id} className="job">
                 <div className="job-row">
                   <span className={`badge ${STATUS_TONE[job.lastStatus ?? ""] ?? "idle"}`}>
@@ -461,6 +470,22 @@ function App_(): JSX.Element {
                     </button>
                     <button className="ghost" disabled={busy} onClick={() => startEdit(job)}>
                       改期
+                    </button>
+                    <button
+                      className="ghost"
+                      disabled={busy || index === 0}
+                      title="上移"
+                      onClick={() => moveJob(job.id, "up")}
+                    >
+                      ↑
+                    </button>
+                    <button
+                      className="ghost"
+                      disabled={busy || index === jobs.length - 1}
+                      title="下移"
+                      onClick={() => moveJob(job.id, "down")}
+                    >
+                      ↓
                     </button>
                     <button
                       className="ghost"

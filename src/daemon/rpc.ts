@@ -150,6 +150,17 @@ export function createRpcHandlers(): Map<string, RpcHandler> {
     return { removed };
   });
 
+  handlers.set("move_job", (params, ctx) => {
+    const jobId = requireString(params, "jobId");
+    const direction = optionalString(params, "direction");
+    if (direction !== "up" && direction !== "down") {
+      throw new Error("direction 需要是 up 或 down");
+    }
+    const jobs = ctx.store.moveJob(jobId, direction);
+    ctx.log(`任务 ${jobId} 顺序已${direction === "up" ? "上移" : "下移"}`);
+    return { jobs };
+  });
+
   handlers.set("run_now", async (params, ctx) => {
     const jobId = optionalString(params, "jobId");
     const started = await ctx.scheduler.runNow(jobId);

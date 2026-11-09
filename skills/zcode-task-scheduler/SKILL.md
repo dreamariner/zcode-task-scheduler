@@ -24,6 +24,7 @@ description: Use when the user wants to schedule work for later, queue a task on
 | `update_job` | 改期、改内容、停用 |
 | `remove_job` | 删除任务 |
 | `run_now` | 立即执行一轮 |
+| `move_job` | 上移/下移调整面板执行顺序（仅面板可调） |
 | `job_status` | 任务状态与最近运行记录 |
 | `get_settings` / `update_settings` | 全局设置（并发、速率、超时、重试、模型） |
 
@@ -65,3 +66,4 @@ description: Use when the user wants to schedule work for later, queue a task on
 - 用户问「跑完了吗」时用 `job_status` 看结果，不要凭印象回答。
 - `update_settings` 只有面板可以调，模型不要碰；任务会以无人值守方式全权限执行，登记前务必向用户复述一遍目标会话和时间。
 - 常驻任务连续 5 轮失败会被调度器自动停用，用户问起时说明这个行为。
+- 同一个会话的多个任务不会并发：调度器按面板顺序排队接力；用户抱怨「顺序不对」时提醒可以在面板用箭头调。

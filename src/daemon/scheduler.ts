@@ -34,6 +34,8 @@ export class Scheduler {
   private ticking = false;
   private readonly inFlight = new Set<string>();
   private readonly missedWindowMs: number;
+  /** 同会话任务的 FIFO 队列：同一个会话绝不并发，只能按面板顺序接力。 */
+  private readonly sessionQueues = new Map<string, Promise<unknown>>();
 
   constructor(private readonly options: SchedulerOptions) {
     this.missedWindowMs = DEFAULT_MISSED_WINDOW_MS;
@@ -99,8 +101,9 @@ export class Scheduler {
   /**
    * 执行一个任务（含失败重试）。
    *
-   * 并发槽只在真正跑尝试的窗口内持有：退避等待期间必须放掉，否则失败高峰时
-   * 几个睡觉的任务就能占满全部并发额度，把别的任务堵死。
+   * 串行约束分两层：同会话的任务先进本会话的 FIFO 队列接力（宿主本来也会拒绝
+   * 并发 prompt，与其靠失败重试撞墙不如在这里排队），跨会话再受全局并发与
+   * 速率闸约束。并发槽只在真正跑尝试的窗口内持有，退避期间放掉。
    */
   private async execute(claimed: { job: Job; dueAt: number | null }): Promise<void> {
     const job = claimed.job;
@@ -126,55 +129,25 @@ export class Scheduler {
         return;
       }
 
-      const maxAttempts = Math.max(1, job.maxAttempts);
-      let attempt = 1;
-      let outcome: AttemptOutcome;
-      for (;;) {
-        await this.options.limiter.acquire();
-        try {
-          outcome = await this.options.runner.runOnce(job, attempt);
-        } finally {
-          this.options.limiter.release();
-        }
+      // 队列登记必须发生在第一个 await 之前：认领循环按面板顺序逐个发起
+      // execute，同步登记才能让同会话任务的接力顺序与面板顺序一致。
+      const sessionKey = this.sessionKeyOf(job);
+      const previous = this.sessionQueues.get(sessionKey) ?? Promise.resolve();
+      let releaseQueue!: () => void;
+      const turn = new Promise<void>((resolve) => {
+        releaseQueue = resolve;
+      });
+      const tail = previous.then(() => turn);
+      this.sessionQueues.set(sessionKey, tail);
 
-        if (!(outcome.status === "failed" && outcome.retryable && attempt < maxAttempts)) break;
-
-        const backoff = settings.retryBackoffMs * 2 ** (attempt - 1);
-        this.log(
-          `任务 ${job.id} 第 ${attempt} 次尝试失败（${outcome.errorCode ?? "unknown"}：${
-            outcome.errorMessage ?? "无详情"
-          }），${backoff}ms 后在原会话重试`,
-        );
-        this.options.store.settleJob(
-          job.id,
-          {
-            status: "failed",
-            error: outcome.errorMessage,
-            willRetry: true,
-            retryAt: this.now + backoff,
-          },
-          this.now,
-        );
-        await sleep(backoff);
-        attempt += 1;
+      try {
+        await previous;
+        await this.runAttempts(job, settings);
+        this.maybeAutoDisable(job.id);
+      } finally {
+        releaseQueue();
+        if (this.sessionQueues.get(sessionKey) === tail) this.sessionQueues.delete(sessionKey);
       }
-
-      this.options.store.settleJob(
-        job.id,
-        {
-          status: outcome.status,
-          error: outcome.errorMessage,
-          willRetry: false,
-          retryAt: null,
-        },
-        this.now,
-      );
-      this.log(
-        `任务 ${job.id} 第 ${attempt} 次尝试结束：${outcome.status}${
-          outcome.errorMessage ? `（${outcome.errorMessage}）` : ""
-        }`,
-      );
-      this.maybeAutoDisable(job.id);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`任务 ${job.id} 执行异常：${message}`);
@@ -186,6 +159,65 @@ export class Scheduler {
     } finally {
       this.inFlight.delete(job.id);
     }
+  }
+
+  /** 同会话排队的键：已有会话用 sessionId；新建会话任务用绑定的会话或任务自身。 */
+  private sessionKeyOf(job: Job): string {
+    if (job.target.kind === "session") return `session:${job.target.sessionId}`;
+    const bound = this.options.store.getBoundSession(job.id);
+    return bound ? `session:${bound}` : `job:${job.id}`;
+  }
+
+  /** 持有会话队列锁跑完所有尝试（含退避重试）。 */
+  private async runAttempts(job: Job, settings: SchedulerSettings): Promise<void> {
+    const maxAttempts = Math.max(1, job.maxAttempts);
+    let attempt = 1;
+    let outcome: AttemptOutcome;
+    for (;;) {
+      await this.options.limiter.acquire();
+      try {
+        outcome = await this.options.runner.runOnce(job, attempt);
+      } finally {
+        this.options.limiter.release();
+      }
+
+      if (!(outcome.status === "failed" && outcome.retryable && attempt < maxAttempts)) break;
+
+      const backoff = settings.retryBackoffMs * 2 ** (attempt - 1);
+      this.log(
+        `任务 ${job.id} 第 ${attempt} 次尝试失败（${outcome.errorCode ?? "unknown"}：${
+          outcome.errorMessage ?? "无详情"
+        }），${backoff}ms 后在原会话重试`,
+      );
+      this.options.store.settleJob(
+        job.id,
+        {
+          status: "failed",
+          error: outcome.errorMessage,
+          willRetry: true,
+          retryAt: this.now + backoff,
+        },
+        this.now,
+      );
+      await sleep(backoff);
+      attempt += 1;
+    }
+
+    this.options.store.settleJob(
+      job.id,
+      {
+        status: outcome.status,
+        error: outcome.errorMessage,
+        willRetry: false,
+        retryAt: null,
+      },
+      this.now,
+    );
+    this.log(
+      `任务 ${job.id} 第 ${attempt} 次尝试结束：${outcome.status}${
+        outcome.errorMessage ? `（${outcome.errorMessage}）` : ""
+      }`,
+    );
   }
 
   /** 常驻任务连续失败到阈值就自动停用，别再每晚空烧。 */

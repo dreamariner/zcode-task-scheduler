@@ -1,3 +1,4 @@
+import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -211,5 +212,94 @@ describe("任务存储", () => {
     expect(runs[0]?.status).toBe("failed");
     expect(runs[0]?.errorCode).toBe("network_error");
     expect(runs[0]?.sessionId).toBe("sess_1");
+  });
+
+  it("moveJob 上下移交换相邻顺序，边界不动", () => {
+    const store = makeStore();
+    const now = Date.now();
+    for (const id of ["job_p1", "job_p2", "job_p3"]) {
+      store.addJob(
+        {
+          title: id,
+          target: { kind: "session", sessionId: "sess_1" },
+          prompt: "跑",
+          workspacePath: "/tmp/ws",
+          schedule: { kind: "daily", timeOfDay: 1_800_000 },
+          maxAttempts: 1,
+        },
+        id,
+        now,
+      );
+    }
+    expect(store.listJobs().map((job) => job.id)).toEqual(["job_p1", "job_p2", "job_p3"]);
+
+    store.moveJob("job_p2", "up");
+    expect(store.listJobs().map((job) => job.id)).toEqual(["job_p2", "job_p1", "job_p3"]);
+
+    store.moveJob("job_p2", "down");
+    expect(store.listJobs().map((job) => job.id)).toEqual(["job_p1", "job_p2", "job_p3"]);
+
+    // 边界：第一个上移、最后一个下移，顺序不变。
+    store.moveJob("job_p1", "up");
+    store.moveJob("job_p3", "down");
+    expect(store.listJobs().map((job) => job.id)).toEqual(["job_p1", "job_p2", "job_p3"]);
+
+    // 删除中间任务后，剩余任务的顺序保持连续。
+    store.removeJob("job_p2");
+    expect(store.listJobs().map((job) => job.id)).toEqual(["job_p1", "job_p3"]);
+    store.moveJob("job_p3", "up");
+    expect(store.listJobs().map((job) => job.id)).toEqual(["job_p3", "job_p1"]);
+  });
+
+  it("旧库缺 sort_order 列时自动迁移并按创建顺序编号", () => {
+    const dir = mkdtempSync(join(tmpdir(), "zts-migrate-"));
+    const file = join(dir, "state.db");
+    // 复刻 sort_order 引入之前的旧表结构，塞两条任务（第二条创建得更晚）。
+    const legacy = new DatabaseSync(file);
+    legacy.exec(`
+      CREATE TABLE jobs (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        target_kind TEXT NOT NULL,
+        target_session_id TEXT,
+        target_label TEXT,
+        target_title TEXT,
+        prompt TEXT NOT NULL,
+        workspace_path TEXT NOT NULL DEFAULT '',
+        workspace_identity TEXT,
+        schedule_kind TEXT NOT NULL,
+        schedule_run_at INTEGER,
+        schedule_time_of_day INTEGER,
+        schedule_weekdays TEXT,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        next_run_at INTEGER,
+        last_status TEXT,
+        last_run_at INTEGER,
+        last_error TEXT,
+        consecutive_failures INTEGER NOT NULL DEFAULT 0,
+        bound_session_id TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+    `);
+    legacy
+      .prepare(
+        "INSERT INTO jobs (id, title, target_kind, target_session_id, prompt, workspace_path, schedule_kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run("old_1", "旧任务一", "session", "sess_1", "跑", "/tmp/ws", "daily", 1000, 1000);
+    legacy
+      .prepare(
+        "INSERT INTO jobs (id, title, target_kind, target_session_id, prompt, workspace_path, schedule_kind, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      )
+      .run("old_2", "旧任务二", "session", "sess_1", "跑", "/tmp/ws", "daily", 2000, 2000);
+    legacy.close();
+
+    const store = new JobStore(openDatabase(file));
+    const jobs = store.listJobs();
+    expect(jobs.map((job) => job.id)).toEqual(["old_1", "old_2"]);
+    // 迁移编号让 moveJob 立刻可用，不会因为全是 0 而出现排序歧义。
+    store.moveJob("old_2", "up");
+    expect(store.listJobs().map((job) => job.id)).toEqual(["old_2", "old_1"]);
   });
 });

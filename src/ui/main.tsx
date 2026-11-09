@@ -56,6 +56,16 @@ interface DaemonStatusInfo {
   recentStarts: number;
 }
 
+interface ModelEntry {
+  providerId: string;
+  modelId: string;
+  label: string;
+  providerLabel?: string;
+  reasoningLevels: string[];
+  reasoningDefault?: string;
+  disabledReason?: string;
+}
+
 const app = new App(
   { name: "zcode-task-scheduler", version: "0.1.0" },
   { tools: { listChanged: true }, availableDisplayModes: ["inline", "fullscreen"] },
@@ -167,6 +177,7 @@ function App_(): JSX.Element {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
+  const [models, setModels] = useState<ModelEntry[]>([]);
   const [daemonStatus, setDaemonStatus] = useState<DaemonStatusInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -189,12 +200,15 @@ function App_(): JSX.Element {
 
   const refresh = useCallback(async () => {
     try {
-      const [jobResult, sessionResult, statusResult, settingResult, daemonResult] =
+      const [jobResult, sessionResult, statusResult, settingResult, modelResult, daemonResult] =
         await Promise.all([
           callTool("list_jobs") as Promise<{ jobs: Job[] }>,
           callTool("list_sessions") as Promise<{ sessions: SessionSummary[] }>,
           callTool("job_status") as Promise<{ runs: RunRecord[] }>,
           callTool("get_settings") as Promise<{ settings: Settings }>,
+          callTool("list_models")
+            .then((result) => (result as { models?: ModelEntry[] }).models ?? [])
+            .catch(() => []),
           callTool("daemon_status")
             .then((result) => (result as { status?: DaemonStatusInfo }).status ?? null)
             .catch(() => null),
@@ -203,6 +217,7 @@ function App_(): JSX.Element {
       setSessions(sessionResult.sessions ?? []);
       setRuns(statusResult.runs ?? []);
       setSettings(settingResult.settings);
+      setModels(modelResult);
       setDaemonStatus(daemonResult);
       setError(null);
     } catch (err) {
@@ -294,6 +309,52 @@ function App_(): JSX.Element {
       void withBusy(() => callTool("update_settings", { [key]: value }));
     },
     [withBusy],
+  );
+
+  /** 切执行模型；换模型时思考等级重置为该模型的默认档。空键表示跟随默认。 */
+  const changeModel = useCallback(
+    (key: string) => {
+      if (key === "default") {
+        void withBusy(() =>
+          callTool("update_settings", { model: { providerId: "", modelId: "" } }),
+        );
+        return;
+      }
+      const split = key.indexOf("/");
+      const providerId = key.slice(0, split);
+      const modelId = key.slice(split + 1);
+      const model = models.find(
+        (item) => item.providerId === providerId && item.modelId === modelId,
+      );
+      const level = model?.reasoningDefault ?? "";
+      void withBusy(() =>
+        callTool("update_settings", {
+          model: {
+            providerId,
+            modelId,
+            ...(level ? { options: { reasoningLevel: level } } : {}),
+          },
+        }),
+      );
+    },
+    [withBusy, models],
+  );
+
+  /** 改思考等级；空表示用模型默认档。 */
+  const changeReasoning = useCallback(
+    (level: string) => {
+      if (!settings) return;
+      const trimmed = level.trim();
+      void withBusy(() =>
+        callTool("update_settings", {
+          model: {
+            ...settings.model,
+            ...(trimmed ? { options: { reasoningLevel: trimmed } } : {}),
+          },
+        }),
+      );
+    },
+    [withBusy, settings],
   );
 
   const sessionOptions = useMemo(
@@ -581,11 +642,75 @@ function App_(): JSX.Element {
             </label>
           </div>
           <p className="hint">
-            模型：{settings.model.providerId}/{settings.model.modelId}
-            {settings.model.options?.reasoningLevel
-              ? `（思考等级 ${settings.model.options.reasoningLevel}）`
-              : ""}
+            {settings.model.modelId
+              ? "执行模型固定为下方所选；留「跟随默认」则用会话自己的模型。"
+              : "执行模型跟随默认；要固定某个模型请在上面挑选。"}
           </p>
+          <label>
+            <span>执行模型</span>
+            <select
+              value={
+                settings.model.modelId
+                  ? `${settings.model.providerId}/${settings.model.modelId}`
+                  : "default"
+              }
+              onChange={(e) => changeModel(e.target.value)}
+            >
+              <option value="default">跟随默认</option>
+              {models
+                .filter((model) => !model.disabledReason)
+                .map((model) => (
+                  <option
+                    key={`${model.providerId}/${model.modelId}`}
+                    value={`${model.providerId}/${model.modelId}`}
+                  >
+                    {(model.providerLabel ?? model.providerId)} · {model.label}
+                  </option>
+                ))}
+              {settings.model.modelId &&
+              !models.some(
+                (model) =>
+                  model.providerId === settings.model.providerId &&
+                  model.modelId === settings.model.modelId,
+              ) ? (
+                <option value={`${settings.model.providerId}/${settings.model.modelId}`}>
+                  {settings.model.providerId} · {settings.model.modelId}
+                </option>
+              ) : null}
+            </select>
+          </label>
+          {settings.model.modelId ? (
+            <label>
+              <span>思考等级</span>
+              {(() => {
+                const selected = models.find(
+                  (model) =>
+                    model.providerId === settings.model.providerId &&
+                    model.modelId === settings.model.modelId,
+                );
+                const current = settings.model.options?.reasoningLevel ?? "";
+                if (selected && selected.reasoningLevels.length > 0) {
+                  return (
+                    <select value={current} onChange={(e) => changeReasoning(e.target.value)}>
+                      <option value="">模型默认</option>
+                      {selected.reasoningLevels.map((level) => (
+                        <option key={level} value={level}>
+                          {level}
+                        </option>
+                      ))}
+                    </select>
+                  );
+                }
+                return (
+                  <input
+                    value={current}
+                    placeholder="模型默认"
+                    onChange={(e) => changeReasoning(e.target.value)}
+                  />
+                );
+              })()}
+            </label>
+          ) : null}
         </section>
       ) : null}
 

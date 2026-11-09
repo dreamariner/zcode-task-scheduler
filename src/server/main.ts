@@ -285,6 +285,16 @@ export async function main(): Promise<void> {
         taskTimeoutMs: z.number().int().positive().optional().describe("单次执行超时（毫秒）"),
         maxRetries: z.number().int().nonnegative().optional().describe("失败后的最大重试次数"),
         retryBackoffMs: z.number().int().nonnegative().optional().describe("首次重试前的等待时间（毫秒）"),
+        model: z
+          .object({
+            providerId: z.string(),
+            modelId: z.string(),
+            options: z.object({ reasoningLevel: z.string() }).optional(),
+          })
+          .optional()
+          .describe(
+            "执行模型；providerId 与 modelId 都留空表示跟随会话默认，候选列表用 list_models 取",
+          ),
       },
       // 只对面板开放：模型侧被注入时不能靠改全局设置放大夜间执行的破坏面。
       _meta: toolUi(["app"]),
@@ -292,6 +302,40 @@ export async function main(): Promise<void> {
     async (input) => {
       const result = await call<{ settings: unknown }>("update_settings", input);
       return textResult("设置已更新", { settings: result.settings });
+    },
+  );
+
+  server.registerTool(
+    "list_models",
+    {
+      description: "列出当前可用的模型（取自会话运行时的模型目录），用来给执行模型挑一个。",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+      _meta: toolUi(),
+    },
+    async () => {
+      const result = await call<{ models: unknown[] }>("list_models", workspaceParams());
+      const models = result.models ?? [];
+      const lines = models.map((entry) => {
+        const item = entry as {
+          providerId: string;
+          modelId: string;
+          label: string;
+          providerLabel?: string;
+          reasoningLevels: string[];
+          disabledReason?: string;
+        };
+        const provider = item.providerLabel ?? item.providerId;
+        const levels = item.reasoningLevels?.length > 0 ? `\t思考等级 ${item.reasoningLevels.join("/")}` : "";
+        const disabled = item.disabledReason ? "\t不可用：" + item.disabledReason : "";
+        return `${item.providerId}/${item.modelId}\t${provider} · ${item.label}${levels}${disabled}`;
+      });
+      return textResult(
+        lines.length > 0
+          ? ["可用模型（providerId/modelId / 名称）：", ...lines].join("\n")
+          : "没有取到模型目录；工作区里先有会话再试。",
+        { models },
+      );
     },
   );
 

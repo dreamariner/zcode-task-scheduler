@@ -85,7 +85,10 @@ export interface Settings {
   maxRetries: number;
   /** 首次重试前的等待时间（毫秒），之后按倍数递增。 */
   retryBackoffMs: number;
-  /** 执行用模型。 */
+  /**
+   * 执行用模型。providerId 与 modelId 都为空表示「跟随默认」：
+   * 不下发 modelSelection，会话用它自己当前选中的模型。
+   */
   model: ModelSelection;
 }
 
@@ -97,6 +100,11 @@ export interface ModelSelection {
    * 字段位置与协议一致：思考等级放在 options 里。
    */
   options?: { reasoningLevel?: string };
+}
+
+/** 模型是否被显式指定；空字符串对表示「跟随默认」。 */
+export function isModelSet(model: ModelSelection): boolean {
+  return model.providerId.trim().length > 0 && model.modelId.trim().length > 0;
 }
 
 export interface SchedulerSettings extends Settings {
@@ -113,11 +121,8 @@ export const DEFAULT_SETTINGS: SchedulerSettings = {
   maxRetries: 2,
   retryBackoffMs: 60_000,
   pollIntervalMs: 20_000,
-  model: {
-    providerId: "minimax",
-    modelId: "MiniMax-M3.1-Flash",
-    options: { reasoningLevel: "max" },
-  },
+  // 默认跟随会话自己的模型；要固定某个模型在面板里挑。
+  model: { providerId: "", modelId: "" },
 };
 
 export interface JobInput {

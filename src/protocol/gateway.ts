@@ -3,6 +3,7 @@ import type { CliLaunch } from "../shared/paths.js";
 import { ProtocolClient } from "./client.js";
 import {
   createSession,
+  listModels,
   listSessions,
   readSession,
   resumeSession,
@@ -10,6 +11,7 @@ import {
   setSessionMode,
   stopSession,
   waitForTurnOutcome,
+  type ModelCatalogEntry,
   type TurnOutcome,
   type WorkspaceRef,
 } from "./session.js";
@@ -17,6 +19,8 @@ import {
 /** 执行器依赖的会话操作集合。抽成接口是为了让单测能注入假实现。 */
 export interface SessionGateway {
   listSessions(workspace: WorkspaceRef): Promise<SessionSummary[]>;
+  /** 列当前可用的模型（取自会话运行时的模型目录）。 */
+  listModels(workspace: WorkspaceRef): Promise<ModelCatalogEntry[]>;
   createSession(workspace: WorkspaceRef, options?: { title?: string; model?: ModelSelection }): Promise<string>;
   resumeSession(sessionId: string, workspace: WorkspaceRef): Promise<void>;
   readSession(sessionId: string): Promise<{ title: string; status: string; mode?: string }>;
@@ -94,6 +98,10 @@ export class ProtocolSessionGateway implements SessionGateway {
 
   listSessions(workspace: WorkspaceRef): Promise<SessionSummary[]> {
     return listSessions(this.client, workspace);
+  }
+
+  listModels(workspace: WorkspaceRef): Promise<ModelCatalogEntry[]> {
+    return listModels(this.client, workspace);
   }
 
   createSession(

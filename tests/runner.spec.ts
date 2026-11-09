@@ -11,6 +11,7 @@ import { DEFAULT_SETTINGS } from "../src/shared/types.js";
 interface SendRecord {
   sessionId: string;
   content: string;
+  model?: unknown;
 }
 
 class FakeGateway implements SessionGateway {
@@ -18,6 +19,7 @@ class FakeGateway implements SessionGateway {
   readonly resumed: string[] = [];
   readonly modes: { sessionId: string; mode: string }[] = [];
   readonly createdSessions: string[] = [];
+  readonly createdOptions: { title?: string; model?: unknown }[] = [];
   readonly stopped: string[] = [];
   /** waitForTurnOutcome 第 N 次调用抛出的错误，按调用顺序消费。 */
   turnErrors: Error[] = [];
@@ -29,9 +31,17 @@ class FakeGateway implements SessionGateway {
     return [];
   }
 
-  async createSession(_workspace: WorkspaceRef, options: { title?: string } = {}): Promise<string> {
+  async listModels(): Promise<[]> {
+    return [];
+  }
+
+  async createSession(
+    _workspace: WorkspaceRef,
+    options: { title?: string; model?: unknown } = {},
+  ): Promise<string> {
     const sessionId = `sess_new_${this.createdSessions.length + 1}`;
     this.createdSessions.push(sessionId);
+    this.createdOptions.push(options);
     return sessionId;
   }
 
@@ -47,8 +57,8 @@ class FakeGateway implements SessionGateway {
     this.modes.push({ sessionId, mode });
   }
 
-  async sendPrompt(sessionId: string, content: string): Promise<void> {
-    this.sends.push({ sessionId, content });
+  async sendPrompt(sessionId: string, content: string, model?: unknown): Promise<void> {
+    this.sends.push({ sessionId, content, ...(model !== undefined ? { model } : {}) });
   }
 
   async waitForTurnOutcome(): Promise<TurnOutcome> {
@@ -219,5 +229,67 @@ describe("任务执行器", () => {
 
     const outcome = await runner.runOnce(job, 1);
     expect(outcome.retryable).toBe(false);
+  });
+
+  it("模型留空表示跟随默认：不下发 modelSelection，新建会话也不指定模型", async () => {
+    const { store } = makeStore();
+    const gateway = new FakeGateway();
+    const job = store.addJob(
+      {
+        title: "默认模型任务",
+        target: { kind: "new-session", title: "夜间报告" },
+        prompt: "写报告",
+        workspacePath: WORKSPACE.workspacePath,
+        schedule: { kind: "once", runAt: Date.now() + 60_000 },
+        maxAttempts: 2,
+      },
+      "job_m1",
+      Date.now(),
+    );
+
+    const runner = new JobRunner({
+      store,
+      settings: () => ({
+        ...DEFAULT_SETTINGS,
+        model: { providerId: "", modelId: "" },
+      }),
+      gatewayFor: () => gateway,
+    });
+
+    await runner.runOnce(job, 1);
+    expect(gateway.createdOptions[0]?.model).toBeUndefined();
+    expect(gateway.sends[0]?.model).toBeUndefined();
+  });
+
+  it("模型显式指定时随指令下发", async () => {
+    const { store } = makeStore();
+    const gateway = new FakeGateway();
+    const job = store.addJob(
+      {
+        title: "指定模型任务",
+        target: { kind: "new-session", title: "夜间报告" },
+        prompt: "写报告",
+        workspacePath: WORKSPACE.workspacePath,
+        schedule: { kind: "once", runAt: Date.now() + 60_000 },
+        maxAttempts: 2,
+      },
+      "job_m2",
+      Date.now(),
+    );
+    const model = {
+      providerId: "minimax",
+      modelId: "MiniMax-M3.1-Flash",
+      options: { reasoningLevel: "max" },
+    };
+
+    const runner = new JobRunner({
+      store,
+      settings: () => ({ ...DEFAULT_SETTINGS, model }),
+      gatewayFor: () => gateway,
+    });
+
+    await runner.runOnce(job, 1);
+    expect(gateway.createdOptions[0]?.model).toEqual(model);
+    expect(gateway.sends[0]?.model).toEqual(model);
   });
 });

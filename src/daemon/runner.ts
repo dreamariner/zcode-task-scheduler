@@ -1,4 +1,5 @@
 import type { Job, SchedulerSettings } from "../shared/types.js";
+import { isModelSet } from "../shared/types.js";
 import type { SessionGateway } from "../protocol/gateway.js";
 import {
   SETTABLE_MODES,
@@ -70,11 +71,13 @@ export class JobRunner {
     if (bound) return { sessionId: bound, created: false };
 
     const settings = this.options.settings();
+    // 模型留空表示「跟随默认」：不指定，让会话用它自己当前选中的模型。
+    const model = isModelSet(settings.model) ? settings.model : undefined;
     const sessionId = await this.options.gatewayFor(this.workspaceFor(job)).createSession(
       this.workspaceFor(job),
       {
         title: job.target.title,
-        model: settings.model,
+        ...(model ? { model } : {}),
       },
     );
     this.options.store.bindSession(job.id, sessionId, this.now);
@@ -166,7 +169,11 @@ export class JobRunner {
       runId = store.startRun(job.id, attempt, sessionId, this.now);
       store.markRunning(job.id, this.now);
 
-      await gateway.sendPrompt(sessionId, content, settings.model);
+      await gateway.sendPrompt(
+        sessionId,
+        content,
+        isModelSet(settings.model) ? settings.model : undefined,
+      );
       let outcome: TurnOutcome;
       try {
         outcome = await gateway.waitForTurnOutcome(sessionId, settings.taskTimeoutMs);

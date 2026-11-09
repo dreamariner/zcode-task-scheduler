@@ -7,6 +7,17 @@ export interface WorkspaceRef {
   workspaceIdentity?: string;
 }
 
+/** 当前可用的模型条目，来自会话运行时的模型目录。 */
+export interface ModelCatalogEntry {
+  providerId: string;
+  modelId: string;
+  label: string;
+  providerLabel?: string;
+  reasoningLevels: string[];
+  reasoningDefault?: string;
+  disabledReason?: string;
+}
+
 export interface TurnOutcome {
   status: "success" | "interrupted" | "failed";
   errorCode?: string;
@@ -118,6 +129,74 @@ export async function readSession(
  * 重试往同一会话发 prompt 也会被「已有回合在跑」挡住。 */
 export async function stopSession(client: ProtocolClient, sessionId: string): Promise<void> {
   await client.request("session/stop", { sessionId });
+}
+
+/**
+ * 列出当前可用的模型。
+ *
+ * 模型目录挂在会话运行时上（app.listModels），而 `session/read` 只回当前模型
+ * （modelAvailability: "current"），完整目录随 `session/resume` 的快照下发
+ * （官方 server-operations.ts 里 resume 的 snapshot 不传 modelAvailability）。
+ * 所以这里借用最近更新的会话 resume 一次取目录；工作区还没有任何会话时
+ * 建一个临时会话取完就关。
+ */
+export async function listModels(
+  client: ProtocolClient,
+  workspace: WorkspaceRef,
+): Promise<ModelCatalogEntry[]> {
+  const sessions = await listSessions(client, workspace);
+  const latest = sessions
+    .filter((session) => session.sessionId)
+    .sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0))[0];
+  let sessionId = latest?.sessionId;
+  let tempCreated = false;
+  if (!sessionId) {
+    sessionId = await createSession(client, workspace);
+    tempCreated = true;
+  }
+  try {
+    const result = await client.request<Record<string, unknown>>("session/resume", {
+      sessionId,
+      workspace,
+    });
+    const settings = asRecord(result.settings);
+    const model = asRecord(settings.model);
+    const available = Array.isArray(model.available) ? model.available : [];
+    return available
+      .map(parseModelOption)
+      .filter((entry): entry is ModelCatalogEntry => entry !== null);
+  } finally {
+    if (tempCreated) {
+      await client.request("session/close", { sessionId }).catch(() => undefined);
+    }
+  }
+}
+
+/** 把协议的模型条目收敛成面板要用的形状；解析不出来的条目丢弃。 */
+function parseModelOption(entry: unknown): ModelCatalogEntry | null {
+  const item = asRecord(entry);
+  const ref = asRecord(item.ref);
+  const providerId = asString(ref.providerId);
+  const modelId = asString(ref.modelId);
+  if (!providerId || !modelId) return null;
+  const reasoning = asRecord(item.reasoning);
+  const levels = Array.isArray(reasoning.levels)
+    ? reasoning.levels
+        .map((level) => asString(asRecord(level).value))
+        .filter((value): value is string => Boolean(value))
+    : [];
+  const providerLabel = asString(item.providerLabel);
+  const reasoningDefault = asString(reasoning.defaultLevel);
+  const disabledReason = asString(item.disabledReason);
+  return {
+    providerId,
+    modelId,
+    label: asString(item.label) ?? modelId,
+    ...(providerLabel ? { providerLabel } : {}),
+    reasoningLevels: levels,
+    ...(reasoningDefault ? { reasoningDefault } : {}),
+    ...(disabledReason ? { disabledReason } : {}),
+  };
 }
 
 /** 把会话切到无人值守可跑的权限模式。 */

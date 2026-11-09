@@ -1,7 +1,7 @@
 import { createServer, type Server, type Socket } from "node:net";
 import { chmod, unlink } from "node:fs/promises";
 import type { SessionGateway } from "../protocol/gateway.js";
-import type { WorkspaceRef } from "../protocol/session.js";
+import type { ModelCatalogEntry, WorkspaceRef } from "../protocol/session.js";
 import type { JobInput, JobPatch, JobStatus, Schedule, SchedulerSettings } from "../shared/types.js";
 import type { JobStore } from "./db.js";
 import type { Scheduler } from "./scheduler.js";
@@ -177,6 +177,23 @@ export function createRpcHandlers(): Map<string, RpcHandler> {
     return { sessions };
   });
 
+  // 模型目录取自会话运行时，取一次要 resume 一个会话；面板每 10 秒轮询，
+  // 不缓存的话每次刷新都会把最近会话拉活一遍。目录变动低频，5 分钟足够新。
+  const MODEL_CACHE_TTL_MS = 5 * 60_000;
+  const modelCache = new Map<string, { at: number; models: ModelCatalogEntry[] }>();
+
+  handlers.set("list_models", async (params, ctx) => {
+    const workspace = workspaceFrom(params);
+    const cached = modelCache.get(workspace.workspaceKey);
+    if (cached && Date.now() - cached.at < MODEL_CACHE_TTL_MS) {
+      return { models: cached.models };
+    }
+    const gateway = await ctx.gatewayFor(workspace);
+    const models = await gateway.listModels(workspace);
+    modelCache.set(workspace.workspaceKey, { at: Date.now(), models });
+    return { models };
+  });
+
   handlers.set("get_settings", (_params, ctx) => ({ settings: ctx.settings() }));
 
   // 下界校验必须硬性拒绝：并发/速率给 0 会让限流闸无限等待，任务从此挂死。
@@ -208,12 +225,18 @@ export function createRpcHandlers(): Map<string, RpcHandler> {
     if (params.model && typeof params.model === "object") {
       const model = params.model as Record<string, unknown>;
       const options = model.options as Record<string, unknown> | undefined;
+      const providerId = typeof model.providerId === "string" ? model.providerId.trim() : "";
+      const modelId = typeof model.modelId === "string" ? model.modelId.trim() : "";
+      // 空对表示「跟随默认」；只给一半说明调用方没搞清楚语义，直接拒绝。
+      if ((providerId === "") !== (modelId === "")) {
+        throw new Error("模型要么 providerId 与 modelId 都留空（跟随默认），要么两者都给");
+      }
+      const reasoningLevel =
+        options && typeof options.reasoningLevel === "string" ? options.reasoningLevel.trim() : "";
       patch.model = {
-        providerId: typeof model.providerId === "string" ? model.providerId : "",
-        modelId: typeof model.modelId === "string" ? model.modelId : "",
-        ...(options && typeof options.reasoningLevel === "string"
-          ? { options: { reasoningLevel: options.reasoningLevel } }
-          : {}),
+        providerId,
+        modelId,
+        ...(reasoningLevel ? { options: { reasoningLevel } } : {}),
       };
     }
     return { settings: ctx.store.setSettings(patch) };

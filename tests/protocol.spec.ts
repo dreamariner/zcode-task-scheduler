@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { ProtocolClient, ProtocolRequestError } from "../src/protocol/client.js";
+import { listModels } from "../src/protocol/session.js";
 
 function fakeLaunch(script: unknown[]): { command: string; args: string[]; source: string } {
   const dir = mkdtempSync(join(tmpdir(), "zts-proto-"));
@@ -102,6 +103,94 @@ describe("ZCode Protocol 客户端", () => {
       await new Promise((resolve) => setTimeout(resolve, 200));
       expect(events[0]?.method).toBe("v4/telemetry/event");
       expect((events[0]?.params as { status: string }).status).toBe("success");
+    } finally {
+      await client.stop();
+    }
+  });
+
+  it("listModels 从最近会话的 resume 快照取模型目录", async () => {
+    const launch = fakeLaunch([
+      {
+        method: "session/list",
+        result: {
+          sessions: [
+            { sessionId: "s1", title: "最近", status: "completed", updatedAt: 200, createdAt: 1 },
+            { sessionId: "s2", title: "更旧", status: "completed", updatedAt: 100, createdAt: 1 },
+          ],
+        },
+      },
+      {
+        method: "session/resume",
+        result: {
+          settings: {
+            model: {
+              current: { providerId: "p1", modelId: "m1" },
+              available: [
+                {
+                  ref: { providerId: "p1", modelId: "m1" },
+                  label: "模型一",
+                  providerLabel: "供应商一",
+                  reasoning: { levels: [{ label: "高", value: "high" }, { label: "低", value: "low" }], defaultLevel: "high" },
+                },
+                {
+                  ref: { providerId: "p2", modelId: "m2" },
+                  label: "模型二",
+                  disabledReason: "额度不足",
+                },
+                { ref: {}, label: "坏条目" },
+              ],
+            },
+          },
+        },
+      },
+    ]);
+    const client = ProtocolClient.start({ launch });
+    try {
+      const models = await listModels(client, {
+        workspaceKey: "/tmp",
+        workspacePath: "/tmp",
+      });
+      // 坏条目被丢弃，不解析成半残对象。
+      expect(models).toHaveLength(2);
+      expect(models[0]).toEqual({
+        providerId: "p1",
+        modelId: "m1",
+        label: "模型一",
+        providerLabel: "供应商一",
+        reasoningLevels: ["high", "low"],
+        reasoningDefault: "high",
+      });
+      expect(models[1]?.disabledReason).toBe("额度不足");
+      expect(models[1]?.reasoningLevels).toEqual([]);
+    } finally {
+      await client.stop();
+    }
+  });
+
+  it("listModels 在工作区没有会话时建临时会话取目录再关掉", async () => {
+    const launch = fakeLaunch([
+      { method: "session/list", result: { sessions: [] } },
+      { method: "session/create", result: { session: { sessionId: "s_temp" } } },
+      {
+        method: "session/resume",
+        result: {
+          settings: {
+            model: {
+              available: [{ ref: { providerId: "p1", modelId: "m1" }, label: "模型一" }],
+            },
+          },
+        },
+      },
+      { method: "session/close", result: {} },
+    ]);
+    const client = ProtocolClient.start({ launch });
+    try {
+      const models = await listModels(client, {
+        workspaceKey: "/tmp",
+        workspacePath: "/tmp",
+      });
+      expect(models).toHaveLength(1);
+      expect(models[0]?.modelId).toBe("m1");
     } finally {
       await client.stop();
     }

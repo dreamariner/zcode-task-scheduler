@@ -1,6 +1,12 @@
 import type { Job, SchedulerSettings } from "../shared/types.js";
 import type { SessionGateway } from "../protocol/gateway.js";
-import type { WorkspaceRef } from "../protocol/session.js";
+import {
+  SETTABLE_MODES,
+  TurnTimeoutError,
+  type SettableMode,
+  type TurnOutcome,
+  type WorkspaceRef,
+} from "../protocol/session.js";
 import type { JobStore } from "./db.js";
 import type { DesktopTaskIndex } from "./desktop-index.js";
 import { continuationPrompt, shouldRetryOutcome } from "./classify.js";
@@ -114,6 +120,20 @@ export class JobRunner {
     }
   }
 
+  /** 读会话当前的权限模式；读不到或不是可设置值就返回 null，恢复时跳过。 */
+  private async currentMode(
+    gateway: SessionGateway,
+    sessionId: string,
+  ): Promise<SettableMode | null> {
+    try {
+      const snapshot = await gateway.readSession(sessionId);
+      const mode = snapshot.mode?.trim();
+      return SETTABLE_MODES.includes(mode as SettableMode) ? (mode as SettableMode) : null;
+    } catch {
+      return null;
+    }
+  }
+
   /** 执行一次尝试并落库。 */
   async runOnce(job: Job, attempt: number): Promise<AttemptOutcome> {
     const settings = this.options.settings();
@@ -121,6 +141,7 @@ export class JobRunner {
 
     let sessionId: string | null = null;
     let runId: number | null = null;
+    let priorMode: SettableMode | null = null;
 
     try {
       const resolved = await this.resolveSession(job);
@@ -130,6 +151,10 @@ export class JobRunner {
       if (!resolved.created) {
         await gateway.resumeSession(sessionId, this.workspaceFor(job));
       }
+
+      // 记下会话原来的权限模式，跑完恢复：夜间执行不该永久改掉用户的会话设置。
+      // 用户恰好在夜里手动改了模式的话会被恢复动作覆盖，这是可接受的取舍。
+      priorMode = await this.currentMode(gateway, sessionId);
       await gateway.setMode(sessionId, "yolo");
 
       const previous = store.listRuns(job.id, 1)[0];
@@ -142,7 +167,31 @@ export class JobRunner {
       store.markRunning(job.id, this.now);
 
       await gateway.sendPrompt(sessionId, content, settings.model);
-      const outcome = await gateway.waitForTurnOutcome(sessionId, settings.taskTimeoutMs);
+      let outcome: TurnOutcome;
+      try {
+        outcome = await gateway.waitForTurnOutcome(sessionId, settings.taskTimeoutMs);
+      } catch (error) {
+        if (error instanceof TurnTimeoutError) {
+          // 超时必须先停回合：旧回合还在跑的话，重试的 prompt 会被
+          // 「已有回合在跑」挡住，重试次数全烧在同一个错误上。
+          try {
+            await gateway.stopSession(sessionId);
+            this.log(`会话 ${sessionId} 的超时回合已停止`);
+          } catch (stopError) {
+            this.log(
+              `停止超时回合失败：${stopError instanceof Error ? stopError.message : String(stopError)}`,
+            );
+          }
+          outcome = {
+            status: "failed",
+            errorCode: "turn_timeout",
+            errorMessage: error.message,
+            errorRetryable: true,
+          };
+        } else {
+          throw error;
+        }
+      }
 
       const failed = outcome.status !== "success";
       store.finishRun(
@@ -186,6 +235,15 @@ export class JobRunner {
         sessionId,
         retryable: true,
       };
+    } finally {
+      // 无论成败都恢复模式；失败路径尤其重要，会话第二天还要给用户正常用。
+      if (sessionId !== null && priorMode !== null && priorMode !== "yolo") {
+        try {
+          await this.options.gatewayFor(this.workspaceFor(job)).setMode(sessionId, priorMode);
+        } catch {
+          // 恢复失败不影响结果；会话留在 yolo 比把任务标记失败更无害。
+        }
+      }
     }
   }
 }

@@ -16,7 +16,8 @@ import { join } from "node:path";
  */
 
 const workspacePath = process.argv[2] ?? process.cwd();
-const CLI = "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
+const CLI =
+  process.env.ZCODE_CLI ?? "/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs";
 const PLUGIN_DATA = join(
   process.env.HOME ?? "",
   ".zcode/cli/plugins/data/zcode-task-scheduler@zcode-task-scheduler-local",

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,17 +17,10 @@ import { afterAll, describe, expect, it } from "vitest";
 const distEntry = join(process.cwd(), "dist/daemon.mjs");
 const hasBuild = existsSync(distEntry);
 
-function ppidOf(pid: number): Promise<number | null> {
-  return new Promise((resolve) => {
-    const child = spawn("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" });
-    let text = "";
-    child.stdout.on("data", (chunk) => (text += chunk));
-    child.on("close", () => {
-      const value = Number(text.trim());
-      resolve(Number.isInteger(value) && value > 0 ? value : null);
-    });
-    child.on("error", () => resolve(null));
-  });
+function ppidOf(pid: number): number | null {
+  const result = spawnSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf8" });
+  const value = Number(result.stdout?.trim());
+  return Number.isInteger(value) && value > 0 ? value : null;
 }
 
 const cleanups: (() => void)[] = [];
@@ -67,7 +60,7 @@ describe.skipIf(!hasBuild)("调度器启动", () => {
     }
     expect(pid).not.toBeNull();
 
-    const ppid = await ppidOf(pid as number);
+    const ppid = ppidOf(pid as number);
     // 1 = init / launchd。被 init 收养才意味着宿主的进程树清理碰不到它。
     expect(ppid).toBe(1);
 

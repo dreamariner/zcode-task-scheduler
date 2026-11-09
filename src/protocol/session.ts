@@ -16,6 +16,21 @@ export interface TurnOutcome {
   tokens?: number;
 }
 
+/** 等待回合终态超时。与普通失败区分开：超时后必须先停掉回合，重试才有意义。 */
+export class TurnTimeoutError extends Error {
+  constructor(
+    readonly sessionId: string,
+    readonly timeoutMs: number,
+  ) {
+    super(`等待会话 ${sessionId} 的回合终态超时（${timeoutMs}ms）`);
+    this.name = "TurnTimeoutError";
+  }
+}
+
+/** 允许无人值守设置的权限模式集合；恢复模式时只接受这些值。 */
+export const SETTABLE_MODES = ["plan", "build", "edit", "yolo", "guarded", "auto"] as const;
+export type SettableMode = (typeof SETTABLE_MODES)[number];
+
 export function workspaceRefOf(workspacePath: string, workspaceIdentity?: string): WorkspaceRef {
   const path = workspacePath.trim();
   return {
@@ -82,17 +97,27 @@ export async function resumeSession(
   await client.request("session/resume", { sessionId, workspace });
 }
 
-/** 读会话快照，取标题与状态。 */
+/** 读会话快照，取标题与状态；mode 用于执行后恢复会话原来的权限模式。 */
 export async function readSession(
   client: ProtocolClient,
   sessionId: string,
-): Promise<{ title: string; status: string }> {
+): Promise<{ title: string; status: string; mode?: string }> {
   const result = await client.request<Record<string, unknown>>("session/read", { sessionId });
   const session = asRecord(result.session);
   return {
     title: asString(session.title) ?? "",
     status: asString(session.status) ?? "",
+    // 快照的 mode 主体挂在 session 下；不同版本可能上浮到顶层，两处都看一眼。
+    ...(asString(session.mode) ?? asString(result.mode)
+      ? { mode: asString(session.mode) ?? asString(result.mode) }
+      : {}),
   };
+}
+
+/** 停掉会话里正在跑的回合。超时路径必须先调这个，否则旧回合还在后台烧 token，
+ * 重试往同一会话发 prompt 也会被「已有回合在跑」挡住。 */
+export async function stopSession(client: ProtocolClient, sessionId: string): Promise<void> {
+  await client.request("session/stop", { sessionId });
 }
 
 /** 把会话切到无人值守可跑的权限模式。 */
@@ -136,7 +161,7 @@ export function waitForTurnOutcome(
     let settled = false;
 
     const timer = setTimeout(() => {
-      finish(() => reject(new Error(`等待会话 ${sessionId} 的回合终态超时（${timeoutMs}ms）`)));
+      finish(() => reject(new TurnTimeoutError(sessionId, timeoutMs)));
     }, timeoutMs);
     timer.unref?.();
 

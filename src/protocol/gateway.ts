@@ -8,6 +8,7 @@ import {
   resumeSession,
   sendPrompt,
   setSessionMode,
+  stopSession,
   waitForTurnOutcome,
   type TurnOutcome,
   type WorkspaceRef,
@@ -18,10 +19,16 @@ export interface SessionGateway {
   listSessions(workspace: WorkspaceRef): Promise<SessionSummary[]>;
   createSession(workspace: WorkspaceRef, options?: { title?: string; model?: ModelSelection }): Promise<string>;
   resumeSession(sessionId: string, workspace: WorkspaceRef): Promise<void>;
-  readSession(sessionId: string): Promise<{ title: string; status: string }>;
+  readSession(sessionId: string): Promise<{ title: string; status: string; mode?: string }>;
   setMode(sessionId: string, mode: "plan" | "build" | "edit" | "yolo" | "guarded" | "auto"): Promise<void>;
   sendPrompt(sessionId: string, content: string, model?: ModelSelection): Promise<void>;
   waitForTurnOutcome(sessionId: string, timeoutMs: number): Promise<TurnOutcome>;
+  /** 停掉会话里正在跑的回合（超时路径专用）。 */
+  stopSession(sessionId: string): Promise<void>;
+  /** 底层 CLI 进程是否已经退出。 */
+  readonly closed: boolean;
+  /** 底层 CLI 进程退出时回调；连接池靠它摘除死 gateway。 */
+  onClose(listener: () => void): void;
   close(): Promise<void>;
 }
 
@@ -39,6 +46,8 @@ export interface GatewayOptions {
  * 这里把无人值守场景下会出现的三类交互都答掉。
  */
 export class ProtocolSessionGateway implements SessionGateway {
+  private readonly closeListeners: (() => void)[] = [];
+
   private constructor(private readonly client: ProtocolClient) {}
 
   static start(options: GatewayOptions): ProtocolSessionGateway {
@@ -76,7 +85,11 @@ export class ProtocolSessionGateway implements SessionGateway {
       reason: "official_auth_unavailable",
     }));
 
-    return new ProtocolSessionGateway(client);
+    const gateway = new ProtocolSessionGateway(client);
+    client.on("close", () => {
+      for (const listener of gateway.closeListeners) listener();
+    });
+    return gateway;
   }
 
   listSessions(workspace: WorkspaceRef): Promise<SessionSummary[]> {
@@ -111,6 +124,18 @@ export class ProtocolSessionGateway implements SessionGateway {
 
   waitForTurnOutcome(sessionId: string, timeoutMs: number): Promise<TurnOutcome> {
     return waitForTurnOutcome(this.client, sessionId, timeoutMs);
+  }
+
+  stopSession(sessionId: string): Promise<void> {
+    return stopSession(this.client, sessionId);
+  }
+
+  get closed(): boolean {
+    return this.client.isClosed;
+  }
+
+  onClose(listener: () => void): void {
+    this.closeListeners.push(listener);
   }
 
   async close(): Promise<void> {

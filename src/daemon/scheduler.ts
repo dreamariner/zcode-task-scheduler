@@ -1,7 +1,8 @@
+import type { ClaimedJob } from "./db.js";
 import type { Job, SchedulerSettings } from "../shared/types.js";
 import type { JobStore } from "./db.js";
 import { Limiter } from "./limiter.js";
-import type { JobRunner } from "./runner.js";
+import type { AttemptOutcome, JobRunner } from "./runner.js";
 
 export interface SchedulerOptions {
   store: JobStore;
@@ -14,6 +15,12 @@ export interface SchedulerOptions {
 
 /** 错过窗口的宽限：超过这个时长仍未执行的任务视为过期，不再补跑。 */
 const DEFAULT_MISSED_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 熔断阈值：常驻任务连续这么多轮都失败就自动停用。
+ * 每轮本身含多次重试尝试，5 轮失败说明任务已经坏透，继续排程只会白烧 token。
+ */
+const AUTO_DISABLE_AFTER_FAILURES = 5;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
@@ -68,18 +75,15 @@ export class Scheduler {
     try {
       const now = this.now;
       const due = this.options.store.claimDue(now);
-      for (const job of due) {
-        if (this.options.store.getJob(job.id)?.lastStatus === "running" && this.inFlight.has(job.id)) {
-          continue;
-        }
-        void this.execute(job);
+      for (const claimed of due) {
+        void this.execute(claimed);
       }
     } finally {
       this.ticking = false;
     }
   }
 
-  /** 立即执行：指定任务，或全部启用中的任务。 */
+  /** 立即执行：指定任务，或全部启用中的任务。显式触发不受错过窗口约束。 */
   async runNow(jobId?: string): Promise<string[]> {
     const jobs = jobId
       ? [this.options.store.getJob(jobId)].filter((job): job is Job => job !== null)
@@ -87,13 +91,19 @@ export class Scheduler {
     const started: string[] = [];
     for (const job of jobs) {
       started.push(job.id);
-      void this.execute(job);
+      void this.execute({ job, dueAt: null });
     }
     return started;
   }
 
-  /** 执行一个任务（含失败重试）。 */
-  private async execute(job: Job): Promise<void> {
+  /**
+   * 执行一个任务（含失败重试）。
+   *
+   * 并发槽只在真正跑尝试的窗口内持有：退避等待期间必须放掉，否则失败高峰时
+   * 几个睡觉的任务就能占满全部并发额度，把别的任务堵死。
+   */
+  private async execute(claimed: { job: Job; dueAt: number | null }): Promise<void> {
+    const job = claimed.job;
     if (this.inFlight.has(job.id)) return;
     this.inFlight.add(job.id);
 
@@ -105,24 +115,30 @@ export class Scheduler {
     });
 
     try {
-      const now = this.now;
-      const overdueBy = (job.nextRunAt ?? now) - now;
-      if (job.nextRunAt !== null && overdueBy < -this.missedWindowMs) {
-        this.log(`任务 ${job.id} 错过执行窗口，跳过`);
+      // dueAt 为 null 表示显式触发（runNow），不受错过窗口约束。
+      if (claimed.dueAt !== null && this.now - claimed.dueAt > this.missedWindowMs) {
+        this.log(`任务 ${job.id} 错过执行窗口（搁置超过 24 小时），跳过`);
         this.options.store.settleJob(
           job.id,
           { status: "failed", error: "错过执行窗口", willRetry: false, retryAt: null },
-          now,
+          this.now,
         );
         return;
       }
 
-      await this.options.limiter.acquire();
-      let attempt = 1;
-      let outcome = await this.options.runner.runOnce(job, attempt);
       const maxAttempts = Math.max(1, job.maxAttempts);
+      let attempt = 1;
+      let outcome: AttemptOutcome;
+      for (;;) {
+        await this.options.limiter.acquire();
+        try {
+          outcome = await this.options.runner.runOnce(job, attempt);
+        } finally {
+          this.options.limiter.release();
+        }
 
-      while (outcome.status === "failed" && outcome.retryable && attempt < maxAttempts) {
+        if (!(outcome.status === "failed" && outcome.retryable && attempt < maxAttempts)) break;
+
         const backoff = settings.retryBackoffMs * 2 ** (attempt - 1);
         this.log(
           `任务 ${job.id} 第 ${attempt} 次尝试失败（${outcome.errorCode ?? "unknown"}：${
@@ -141,16 +157,14 @@ export class Scheduler {
         );
         await sleep(backoff);
         attempt += 1;
-        outcome = await this.options.runner.runOnce(job, attempt);
       }
 
-      const willRetry = false;
       this.options.store.settleJob(
         job.id,
         {
           status: outcome.status,
           error: outcome.errorMessage,
-          willRetry,
+          willRetry: false,
           retryAt: null,
         },
         this.now,
@@ -160,6 +174,7 @@ export class Scheduler {
           outcome.errorMessage ? `（${outcome.errorMessage}）` : ""
         }`,
       );
+      this.maybeAutoDisable(job.id);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.log(`任务 ${job.id} 执行异常：${message}`);
@@ -169,8 +184,18 @@ export class Scheduler {
         this.now,
       );
     } finally {
-      this.options.limiter.release();
       this.inFlight.delete(job.id);
     }
+  }
+
+  /** 常驻任务连续失败到阈值就自动停用，别再每晚空烧。 */
+  private maybeAutoDisable(jobId: string): void {
+    const job = this.options.store.getJob(jobId);
+    if (!job || !job.enabled || job.schedule.kind === "once") return;
+    if (job.consecutiveFailures < AUTO_DISABLE_AFTER_FAILURES) return;
+    this.options.store.setEnabled(jobId, false, this.now);
+    this.log(
+      `任务 ${jobId} 已连续失败 ${job.consecutiveFailures} 轮，自动停用；修好后可在面板重新启用`,
+    );
   }
 }

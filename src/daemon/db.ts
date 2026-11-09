@@ -99,6 +99,12 @@ export function openDatabase(file: string): DatabaseSync {
   return db;
 }
 
+/** 认领结果：dueAt 是被认领那一刻的计划时刻，调度器靠它判断错过窗口。 */
+export interface ClaimedJob {
+  job: Job;
+  dueAt: number;
+}
+
 function rowToJob(row: Record<string, unknown>): Job {
   const kind = String(row.target_kind);
   const target: JobTarget =
@@ -246,30 +252,43 @@ export class JobStore {
   updateJob(id: string, patch: JobPatch, now: number): Job | null {
     const job = this.getJob(id);
     if (!job) return null;
+    // patch 里没带 target 时必须沿用库里的原值：面板的停用/启用、改期都只传部分字段，
+    // 之前这里把 target 三列无条件写成 null，kind 却保留，session 类任务从此废掉。
+    const target = patch.target ?? job.target;
+    const boundBefore = this.getBoundSession(id);
     const schedule = patch.schedule ? scheduleColumns(patch.schedule) : null;
-    const target = patch.target;
+    // 启用一个没有下次执行时刻的任务（典型是已完成的 once）要让它立刻可被认领，
+    // 否则「启用」按钮看起来毫无作用。
+    const nextRun = schedule
+      ? nextRunAt(patch.schedule as Schedule, now)
+      : patch.enabled === true && job.nextRunAt === null
+        ? now
+        : job.nextRunAt;
     this.db
       .prepare(
         `UPDATE jobs SET
            title = ?, prompt = ?, target_kind = ?, target_session_id = ?, target_label = ?,
            target_title = ?, schedule_kind = ?, schedule_run_at = ?, schedule_time_of_day = ?,
-           schedule_weekdays = ?, enabled = ?, max_attempts = ?, next_run_at = ?, updated_at = ?
+           schedule_weekdays = ?, enabled = ?, max_attempts = ?, next_run_at = ?,
+           bound_session_id = ?, updated_at = ?
          WHERE id = ?`,
       )
       .run(
         patch.title ?? job.title,
         patch.prompt ?? job.prompt,
-        target ? target.kind : job.target.kind,
-        target && target.kind === "session" ? target.sessionId : target ? null : null,
-        target && target.kind === "session" ? (target.label ?? null) : target ? null : null,
-        target && target.kind === "new-session" ? (target.title ?? null) : target ? null : null,
+        target.kind,
+        target.kind === "session" ? target.sessionId : null,
+        target.kind === "session" ? (target.label ?? null) : null,
+        target.kind === "new-session" ? (target.title ?? null) : null,
         schedule ? schedule.schedule_kind : scheduleKindOf(job.schedule),
         schedule ? schedule.schedule_run_at : runAtOf(job.schedule),
         schedule ? schedule.schedule_time_of_day : timeOfDayOf(job.schedule),
         schedule ? schedule.schedule_weekdays : weekdaysOf(job.schedule),
         patch.enabled === undefined ? (job.enabled ? 1 : 0) : patch.enabled ? 1 : 0,
         patch.maxAttempts ?? job.maxAttempts,
-        patch.schedule ? nextRunAt(patch.schedule, now) : job.nextRunAt,
+        nextRun,
+        // 目标变了就作废旧绑定：new-session 任务换目标后不该复用上一次新建的会话。
+        patch.target !== undefined ? null : boundBefore,
         now,
         id,
       );
@@ -282,8 +301,8 @@ export class JobStore {
     return Number(result.changes) > 0;
   }
 
-  /** 认领到期任务：把 next_run_at 清空并标记为运行中，避免重复认领。 */
-  claimDue(now: number): Job[] {
+  /** 认领结果：job 是清空 next_run_at 之后的最新快照，dueAt 是被认领时的计划时刻。 */
+  claimDue(now: number): ClaimedJob[] {
     const rows = this.db
       .prepare(
         `SELECT * FROM jobs
@@ -291,9 +310,12 @@ export class JobStore {
            AND last_status IS NOT 'running'`,
       )
       .all(now) as Record<string, unknown>[];
-    const claimed: Job[] = [];
+    const claimed: ClaimedJob[] = [];
     for (const row of rows) {
       const id = String(row.id);
+      // 计划时刻必须在清空之前取走：UPDATE 会把它抹掉，而调度器的
+      // 「错过窗口」判断靠它区分「到点了」和「搁置了几天才轮到」。
+      const dueAt = Number(row.next_run_at);
       const result = this.db
         .prepare(
           "UPDATE jobs SET last_status = 'running', next_run_at = NULL, updated_at = ? WHERE id = ? AND next_run_at IS NOT NULL",
@@ -301,10 +323,35 @@ export class JobStore {
         .run(now, id);
       if (Number(result.changes) === 1) {
         const job = this.getJob(id);
-        if (job) claimed.push(job);
+        if (job) claimed.push({ job, dueAt });
       }
     }
     return claimed;
+  }
+
+  /**
+   * 启动恢复：daemon 在执行中途被强杀时，任务会留在 running 且没有 next_run_at，
+   * claimDue 的条件永远挑不到它。启动时把这类残留复位成待执行。
+   */
+  resetStaleRuns(now: number): number {
+    const result = this.db
+      .prepare(
+        `UPDATE jobs SET last_status = 'scheduled',
+           next_run_at = COALESCE(next_run_at, ?), updated_at = ?
+         WHERE last_status = 'running'`,
+      )
+      .run(now, now);
+    return Number(result.changes);
+  }
+
+  /** 熔断用：直接改启用位。停用时把 next_run_at 一并清掉，空闲自退判断才能生效。 */
+  setEnabled(id: string, enabled: boolean, now: number): void {
+    const job = this.getJob(id);
+    if (!job) return;
+    const nextRun = enabled ? (job.nextRunAt ?? nextRunAt(job.schedule, now)) : null;
+    this.db
+      .prepare("UPDATE jobs SET enabled = ?, next_run_at = ?, updated_at = ? WHERE id = ?")
+      .run(enabled ? 1 : 0, nextRun, now, id);
   }
 
   markRunning(jobId: string, now: number): void {

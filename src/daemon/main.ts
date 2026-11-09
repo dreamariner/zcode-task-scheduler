@@ -90,6 +90,9 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<void> {
   const startedAt = Date.now();
 
   const store = new JobStore(openDatabase(stateDbPath(env)));
+  // 上次进程若在任务执行中途被强杀，任务会留在 running 且没有下次执行时刻，
+  // 不复位就永远不会再跑。启动时统一恢复。
+  const recovered = store.resetStaleRuns(Date.now());
   const launch = resolveCliLaunch(options.cliPath ?? env.ZCODE_CLI_PATH, env);
   const pool = new GatewayPool(launch, { env, log });
 
@@ -113,12 +116,23 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<void> {
     scheduler,
     settings,
     gatewayFor: (workspace) => pool.for(workspace),
+    status: () => ({
+      pid: process.pid,
+      startedAt,
+      launchSource: pool.launchSource,
+      busyJobIds: scheduler.busyJobIds,
+      activeSlots: limiter.activeCount,
+      recentStarts: limiter.recentStartCount,
+    }),
     log,
   });
   await rpc.listen();
 
   scheduler.start();
-  log(`daemon 启动：pid=${process.pid} CLI 来源=${pool.launchSource}`);
+  log(
+    `daemon 启动：pid=${process.pid} CLI 来源=${pool.launchSource}` +
+      (recovered > 0 ? `（恢复了 ${recovered} 个中断残留的任务）` : ""),
+  );
 
   // 空闲自退：没有任何待执行任务、也没有在跑的活时，长期挂着没意义。
   // 一旦有任务登记，重新打开插件会把它再拉起来。

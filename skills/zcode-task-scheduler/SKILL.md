@@ -63,3 +63,5 @@ description: Use when the user wants to schedule work for later, queue a task on
 - 派到长会话前先提醒用户：长会话的上下文会让首轮消耗很大，专用会话更合适。
 - 派单前先看一眼 `job_status`，确认没有同类任务在排队。
 - 用户问「跑完了吗」时用 `job_status` 看结果，不要凭印象回答。
+- `update_settings` 只有面板可以调，模型不要碰；任务会以无人值守方式全权限执行，登记前务必向用户复述一遍目标会话和时间。
+- 常驻任务连续 5 轮失败会被调度器自动停用，用户问起时说明这个行为。

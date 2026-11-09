@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { openDatabase, JobStore } from "../src/daemon/db.js";
 import { JobRunner } from "../src/daemon/runner.js";
 import type { SessionGateway } from "../src/protocol/gateway.js";
-import type { TurnOutcome, WorkspaceRef } from "../src/protocol/session.js";
+import { TurnTimeoutError, type TurnOutcome, type WorkspaceRef } from "../src/protocol/session.js";
 import { DEFAULT_SETTINGS } from "../src/shared/types.js";
 
 interface SendRecord {
@@ -18,6 +18,11 @@ class FakeGateway implements SessionGateway {
   readonly resumed: string[] = [];
   readonly modes: { sessionId: string; mode: string }[] = [];
   readonly createdSessions: string[] = [];
+  readonly stopped: string[] = [];
+  /** waitForTurnOutcome 第 N 次调用抛出的错误，按调用顺序消费。 */
+  turnErrors: Error[] = [];
+  closed = false;
+
   outcomes: TurnOutcome[] = [];
 
   async listSessions(): Promise<[]> {
@@ -34,8 +39,8 @@ class FakeGateway implements SessionGateway {
     this.resumed.push(sessionId);
   }
 
-  async readSession(sessionId: string): Promise<{ title: string; status: string }> {
-    return { title: `标题-`, status: "completed" };
+  async readSession(sessionId: string): Promise<{ title: string; status: string; mode?: string }> {
+    return { title: `标题-`, status: "completed", mode: "build" };
   }
 
   async setMode(sessionId: string, mode: string): Promise<void> {
@@ -47,8 +52,18 @@ class FakeGateway implements SessionGateway {
   }
 
   async waitForTurnOutcome(): Promise<TurnOutcome> {
+    const error = this.turnErrors.shift();
+    if (error) throw error;
     const outcome = this.outcomes.shift();
     return outcome ?? { status: "success" };
+  }
+
+  async stopSession(sessionId: string): Promise<void> {
+    this.stopped.push(sessionId);
+  }
+
+  onClose(_listener: () => void): void {
+    // 假实现不需要通知
   }
 
   async close(): Promise<void> {}
@@ -102,7 +117,44 @@ describe("任务执行器", () => {
     expect(gateway.sends[1]?.content).toContain("连接被重置");
     expect(gateway.sends[1]?.content).toContain("跑一次巡检");
     expect(gateway.sends[1]?.content).toContain("请从中断处继续");
-    expect(gateway.modes.every((item) => item.mode === "yolo")).toBe(true);
+    // 每次尝试前切 yolo，结束后把会话恢复回原来的 build 模式。
+    expect(gateway.modes.filter((item) => item.mode === "yolo")).toHaveLength(2);
+    expect(gateway.modes[gateway.modes.length - 1]?.mode).toBe("build");
+  });
+
+  it("等待终态超时会先停掉回合，再按可重试失败结算", async () => {
+    const { store } = makeStore();
+    const gateway = new FakeGateway();
+    gateway.turnErrors = [new TurnTimeoutError("sess_existing", 30_000)];
+    const job = store.addJob(
+      {
+        title: "超时任务",
+        target: { kind: "session", sessionId: "sess_existing" },
+        prompt: "跑一次",
+        workspacePath: WORKSPACE.workspacePath,
+        schedule: { kind: "once", runAt: Date.now() + 60_000 },
+        maxAttempts: 3,
+      },
+      "job_t1",
+      Date.now(),
+    );
+
+    const runner = new JobRunner({
+      store,
+      settings: () => ({ ...DEFAULT_SETTINGS, taskTimeoutMs: 30_000 }),
+      gatewayFor: () => gateway,
+    });
+
+    const outcome = await runner.runOnce(job, 1);
+    expect(outcome.status).toBe("failed");
+    expect(outcome.errorCode).toBe("turn_timeout");
+    expect(outcome.retryable).toBe(true);
+    // 不停掉旧回合，重试的 prompt 会被「已有回合在跑」挡住。
+    expect(gateway.stopped).toEqual(["sess_existing"]);
+
+    const run = store.listRuns(job.id, 1)[0];
+    expect(run?.status).toBe("failed");
+    expect(run?.errorCode).toBe("turn_timeout");
   });
 
   it("新建会话类型的任务只建一次会话，重试复用同一个", async () => {

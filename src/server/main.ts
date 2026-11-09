@@ -21,12 +21,12 @@ function workspaceParams(): { workspacePath: string; workspaceIdentity?: string 
   };
 }
 
-function toolUi(): Record<string, unknown> {
+function toolUi(visibility: string[] = ["model", "app"]): Record<string, unknown> {
   return {
     ui: {
       resourceUri: PANEL_URI,
       surface: SURFACE_ID,
-      visibility: ["model", "app"],
+      visibility,
     },
   };
 }
@@ -276,7 +276,7 @@ export async function main(): Promise<void> {
   server.registerTool(
     "update_settings",
     {
-      description: "修改调度器的全局设置。",
+      description: "修改调度器的全局设置。只有面板可以调：改并发与速率会改变夜间执行的闸门，模型不应碰。",
       inputSchema: {
         defaultTimeOfDay: z.number().optional().describe("每天几点（当天零点起的毫秒偏移）"),
         maxConcurrent: z.number().int().positive().optional().describe("全局并发上限"),
@@ -286,11 +286,26 @@ export async function main(): Promise<void> {
         maxRetries: z.number().int().nonnegative().optional().describe("失败后的最大重试次数"),
         retryBackoffMs: z.number().int().nonnegative().optional().describe("首次重试前的等待时间（毫秒）"),
       },
-      _meta: toolUi(),
+      // 只对面板开放：模型侧被注入时不能靠改全局设置放大夜间执行的破坏面。
+      _meta: toolUi(["app"]),
     },
     async (input) => {
       const result = await call<{ settings: unknown }>("update_settings", input);
       return textResult("设置已更新", { settings: result.settings });
+    },
+  );
+
+  server.registerTool(
+    "daemon_status",
+    {
+      description: "查看调度器进程的运行状态（是否活着、CLI 来源、正在执行的任务）。",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+      _meta: toolUi(),
+    },
+    async () => {
+      const result = await call<{ status: Record<string, unknown> }>("status");
+      return textResult(JSON.stringify(result.status, null, 2), { status: result.status });
     },
   );
 

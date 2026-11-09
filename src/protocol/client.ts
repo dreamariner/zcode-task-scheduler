@@ -66,6 +66,11 @@ export class ProtocolClient extends EventEmitter {
     this.child.stderr.on("data", (chunk: string) => {
       this.options.onLog?.(`[cli stderr] ${chunk.trimEnd()}`);
     });
+    // CLI 死亡瞬间若恰好在写帧，stdin 会派发 error；不挂监听就是未捕获异常，
+    // 会把整个 daemon 打死。exit 处理器负责拒绝挂起请求，这里只兜住写侧。
+    this.child.stdin.on("error", (error: Error) => {
+      this.options.onLog?.(`[cli stdin] ${error.message}`);
+    });
     this.child.on("exit", (code, signal) => {
       this.closed = true;
       const reason = `ZCode CLI 进程退出（code=${code ?? "null"} signal=${signal ?? "null"}）`;
@@ -96,6 +101,11 @@ export class ProtocolClient extends EventEmitter {
   /** 注册服务端反向请求的应答器。 */
   onServerRequest(method: string, handler: ServerRequestHandler): void {
     this.serverHandlers.set(method, handler);
+  }
+
+  /** 底层 CLI 进程是否已退出。 */
+  get isClosed(): boolean {
+    return this.closed;
   }
 
   request<T = unknown>(method: string, params?: unknown): Promise<T> {
@@ -133,7 +143,13 @@ export class ProtocolClient extends EventEmitter {
   }
 
   private write(message: unknown): void {
-    this.child.stdin.write(`${JSON.stringify(message)}\n`);
+    try {
+      this.child.stdin.write(`${JSON.stringify(message)}\n`);
+    } catch (error) {
+      // 进程刚死时 write 可能同步抛错；error 监听器兜异步路径，这里兜同步路径。
+      const text = error instanceof Error ? error.message : String(error);
+      this.options.onLog?.(`[cli stdin] 写帧失败：${text}`);
+    }
   }
 
   private onStdout(chunk: string): void {

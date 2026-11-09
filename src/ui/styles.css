@@ -243,3 +243,42 @@ button:disabled {
   color: var(--muted);
   font-size: 12px;
 }
+
+.daemon-hint {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: var(--card);
+}
+
+.daemon-hint.down {
+  color: var(--bad);
+  border: 1px solid var(--bad);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.chip.on {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.edit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+}

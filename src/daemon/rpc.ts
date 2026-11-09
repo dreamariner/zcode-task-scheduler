@@ -1,5 +1,5 @@
 import { createServer, type Server, type Socket } from "node:net";
-import { unlink } from "node:fs/promises";
+import { chmod, unlink } from "node:fs/promises";
 import type { SessionGateway } from "../protocol/gateway.js";
 import type { WorkspaceRef } from "../protocol/session.js";
 import type { JobInput, JobPatch, JobStatus, Schedule, SchedulerSettings } from "../shared/types.js";
@@ -12,11 +12,23 @@ export interface RpcRequest {
   params?: Record<string, unknown>;
 }
 
+/** daemon 的运行状态，面板顶部指示条用。 */
+export interface DaemonStatus {
+  pid: number;
+  startedAt: number;
+  launchSource: string;
+  busyJobIds: string[];
+  activeSlots: number;
+  recentStarts: number;
+}
+
 export interface RpcContext {
   store: JobStore;
   scheduler: Scheduler;
   settings: () => SchedulerSettings;
   gatewayFor: (workspace: WorkspaceRef) => SessionGateway | Promise<SessionGateway>;
+  /** 返回 daemon 自身的运行状态；面板轮询它判断调度器是否活着。 */
+  status?: () => DaemonStatus;
   log: (message: string) => void;
 }
 
@@ -167,15 +179,32 @@ export function createRpcHandlers(): Map<string, RpcHandler> {
 
   handlers.set("get_settings", (_params, ctx) => ({ settings: ctx.settings() }));
 
+  // 下界校验必须硬性拒绝：并发/速率给 0 会让限流闸无限等待，任务从此挂死。
+  // 面板输入框清空的瞬间就会发出 0，不能靠前端拦。
+  const requireMin = (params: Record<string, unknown>, key: string, min: number, integer = false): number => {
+    const value = Number(params[key]);
+    if (!Number.isFinite(value) || value < min) {
+      throw new Error(`${key} 需要 ≥ ${min}`);
+    }
+    if (integer && !Number.isInteger(value)) {
+      throw new Error(`${key} 需要是整数`);
+    }
+    return value;
+  };
+
   handlers.set("update_settings", (params, ctx) => {
     const patch: Partial<SchedulerSettings> = {};
-    if (Number.isFinite(Number(params.defaultTimeOfDay))) patch.defaultTimeOfDay = Number(params.defaultTimeOfDay);
-    if (Number.isFinite(Number(params.maxConcurrent))) patch.maxConcurrent = Number(params.maxConcurrent);
-    if (Number.isFinite(Number(params.maxStartsPerMinute))) patch.maxStartsPerMinute = Number(params.maxStartsPerMinute);
-    if (Number.isFinite(Number(params.minGapMs))) patch.minGapMs = Number(params.minGapMs);
-    if (Number.isFinite(Number(params.taskTimeoutMs))) patch.taskTimeoutMs = Number(params.taskTimeoutMs);
-    if (Number.isFinite(Number(params.maxRetries))) patch.maxRetries = Number(params.maxRetries);
-    if (Number.isFinite(Number(params.retryBackoffMs))) patch.retryBackoffMs = Number(params.retryBackoffMs);
+    if (params.defaultTimeOfDay !== undefined) {
+      const value = requireMin(params, "defaultTimeOfDay", 0);
+      if (value >= 24 * 60 * 60 * 1000) throw new Error("defaultTimeOfDay 需要 < 24 小时");
+      patch.defaultTimeOfDay = value;
+    }
+    if (params.maxConcurrent !== undefined) patch.maxConcurrent = requireMin(params, "maxConcurrent", 1, true);
+    if (params.maxStartsPerMinute !== undefined) patch.maxStartsPerMinute = requireMin(params, "maxStartsPerMinute", 1, true);
+    if (params.minGapMs !== undefined) patch.minGapMs = requireMin(params, "minGapMs", 0);
+    if (params.taskTimeoutMs !== undefined) patch.taskTimeoutMs = requireMin(params, "taskTimeoutMs", 60_000);
+    if (params.maxRetries !== undefined) patch.maxRetries = requireMin(params, "maxRetries", 0);
+    if (params.retryBackoffMs !== undefined) patch.retryBackoffMs = requireMin(params, "retryBackoffMs", 0);
     if (params.model && typeof params.model === "object") {
       const model = params.model as Record<string, unknown>;
       const options = model.options as Record<string, unknown> | undefined;
@@ -188,6 +217,11 @@ export function createRpcHandlers(): Map<string, RpcHandler> {
       };
     }
     return { settings: ctx.store.setSettings(patch) };
+  });
+
+  handlers.set("status", (_params, ctx) => {
+    if (!ctx.status) throw new Error("daemon 未提供状态查询");
+    return { status: ctx.status() };
   });
 
   return handlers;
@@ -254,6 +288,9 @@ export function createRpcServer(socketFile: string, context: RpcContext): RpcSer
           resolve();
         });
       });
+      // socket 建在插件数据目录里，权限跟随 umask；显式收到 0600，
+      // 保证只有当前用户能连上来派 yolo 任务。
+      await chmod(socketFile, 0o600).catch(() => undefined);
     },
     close: async () => {
       for (const socket of sockets) socket.destroy();

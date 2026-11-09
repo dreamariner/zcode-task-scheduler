@@ -29,15 +29,22 @@ export class GatewayPool {
     if (!this.launch) {
       throw new Error("未探测到可用的 ZCode CLI，请在插件配置里指定 CLI 路径");
     }
-    const existing = this.gateways.get(workspace.workspaceKey);
-    if (existing) return existing;
+    const key = workspace.workspaceKey;
+    const existing = this.gateways.get(key);
+    if (existing && !existing.closed) return existing;
+    // CLI 进程崩了之后旧 gateway 就是死的：不复用、立即摘除，否则这个工作区
+    // 的所有任务会一直撞在同一具尸体上，直到 daemon 重启。
+    if (existing) this.gateways.delete(key);
     const gateway = ProtocolSessionGateway.start({
       launch: this.launch,
       cwd: this.options.cwd ?? workspace.workspacePath,
       env: this.options.env,
       onLog: this.options.log,
     });
-    this.gateways.set(workspace.workspaceKey, gateway);
+    this.gateways.set(key, gateway);
+    gateway.onClose(() => {
+      if (this.gateways.get(key) === gateway) this.gateways.delete(key);
+    });
     return gateway;
   }
 

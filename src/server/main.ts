@@ -363,6 +363,14 @@ export async function main(): Promise<void> {
   );
 
   await server.connect(new StdioServerTransport());
+
+  // 插件一加载就把调度器拉起来：任务是夜里执行的，不能等到用户点了工具才开工。
+  // pidfile 单例锁保证只有第一个会话会真的拉起它。
+  void getDaemon().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`[${SERVER_NAME}] 调度器启动失败：${message}\n`);
+  });
+
   if (daemonFailure) {
     process.stderr.write(`[${SERVER_NAME}] 初始连接失败：${daemonFailure}\n`);
   }

@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import { openDatabase, JobStore } from "./db.js";
 import { DesktopTaskIndex } from "./desktop-index.js";
@@ -16,6 +16,9 @@ export interface DaemonOptions {
   logFile?: string;
 }
 
+/** 队列为空后的空闲自退阈值。 */
+const IDLE_EXIT_MS = 30 * 60 * 1000;
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -27,20 +30,42 @@ function isProcessAlive(pid: number): boolean {
 
 /**
  * 单例锁：pidfile 里存 pid，进程还活着就说明已有 daemon 在跑。
- * 插件 MCP server 每次会话启动都会尝试拉起 daemon，靠这个避免起一堆。
+ * 插件 MCP server 每个会话都会尝试拉起 daemon，多个会话可能同时发起，
+ * 所以锁必须是原子创建的（O_EXCL），否则两个进程会同时认为自己拿到了锁。
  */
 function acquirePidLock(file: string): { acquired: boolean; pid: number | null } {
   mkdirSync(dirname(file), { recursive: true });
-  try {
-    const existing = Number(readFileSync(file, "utf8").trim());
-    if (Number.isInteger(existing) && existing > 0 && isProcessAlive(existing)) {
-      return { acquired: false, pid: existing };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      // wx：文件已存在时抛 EEXIST，创建本身是原子的。
+      const handle = openSync(file, "wx");
+      try {
+        writeSync(handle, `${process.pid}\n`);
+      } finally {
+        closeSync(handle);
+      }
+      return { acquired: true, pid: process.pid };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "EEXIST") throw error;
+      let existing = Number.NaN;
+      try {
+        existing = Number(readFileSync(file, "utf8").trim());
+      } catch {
+        existing = Number.NaN;
+      }
+      if (Number.isInteger(existing) && existing > 0 && isProcessAlive(existing)) {
+        return { acquired: false, pid: existing };
+      }
+      // 僵尸锁（上次进程崩了没清），清掉后重试。
+      try {
+        unlinkSync(file);
+      } catch {
+        // 清理失败就当没锁住
+      }
     }
-  } catch {
-    // 没有 pidfile 或内容损坏，继续按新实例处理
   }
-  writeFileSync(file, `${process.pid}\n`);
-  return { acquired: true, pid: process.pid };
+  return { acquired: false, pid: null };
 }
 
 export async function runDaemon(options: DaemonOptions = {}): Promise<void> {
@@ -62,6 +87,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<void> {
     log(`已有 daemon 在运行（pid=${lock.pid}），本次退出`);
     return;
   }
+  const startedAt = Date.now();
 
   const store = new JobStore(openDatabase(stateDbPath(env)));
   const launch = resolveCliLaunch(options.cliPath ?? env.ZCODE_CLI_PATH, env);
@@ -93,6 +119,22 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<void> {
 
   scheduler.start();
   log(`daemon 启动：pid=${process.pid} CLI 来源=${pool.launchSource}`);
+
+  // 空闲自退：没有任何待执行任务、也没有在跑的活时，长期挂着没意义。
+  // 一旦有任务登记，重新打开插件会把它再拉起来。
+  const idleExit = setInterval(() => {
+    if (scheduler.busyJobIds.length > 0) return;
+    const jobs = store.listJobs();
+    if (jobs.some((job) => job.enabled && job.nextRunAt !== null)) return;
+    const lastActivity = jobs.reduce(
+      (latest, job) => Math.max(latest, job.updatedAt),
+      startedAt,
+    );
+    if (Date.now() - lastActivity < IDLE_EXIT_MS) return;
+    log("队列已空且长时间无活动，daemon 退出");
+    void shutdown("idle");
+  }, 60_000);
+  idleExit.unref?.();
 
   let closing = false;
   const shutdown = async (signal: string): Promise<void> => {

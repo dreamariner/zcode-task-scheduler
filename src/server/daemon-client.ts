@@ -114,7 +114,7 @@ export class DaemonClient {
       env,
     });
     child.unref();
-    this.log(`已拉起 daemon，pid=${child.pid}`);
+    this.log(`尝试拉起 daemon，pid=${child.pid}（若已有实例在跑，这个进程会自行退出）`);
   }
 
   private openSocket(): Promise<void> {

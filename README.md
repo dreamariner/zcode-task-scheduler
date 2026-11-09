@@ -38,7 +38,7 @@ node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --sc
 
 装好后打开面板：**设置 → 插件 → 夜间调度 → 打开**，或在会话侧栏找到「夜间调度」标签页。
 
-> **重要**：插件的 MCP server 是在**会话创建时**被并进该会话的运行时配置的。先开会话、后装插件，这个会话里就没有本插件的 MCP server，面板会报 `MCP App connection is unavailable`。重装插件后，**已经开着的会话都要重载一次**（应用头部「重新加载会话」，或从侧栏重新打开该会话）才能用面板；新建的会话直接可用。
+> **重要**：插件的 MCP server 是在**会话创建时**被并进该会话的运行时配置的。先开会话、后装插件，这个会话里就没有本插件的 MCP server，面板会报 `MCP App connection is unavailable`。宿主也不会在插件 MCP server 意外断开后自动重连（连接池只在会话启动时连一次）。所以**重装插件、或插件 MCP server 掉线之后，已经开着的会话都要重载一次**（应用头部「重新加载会话」，或从侧栏重新打开该会话）才能用面板；新建的会话直接可用。
 
 ## 用法
 

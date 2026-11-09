@@ -1,5 +1,6 @@
 import { appendFileSync, closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
+import { autostartStatus } from "./autostart.js";
 import { openDatabase, JobStore } from "./db.js";
 import { DesktopTaskIndex } from "./desktop-index.js";
 import { GatewayPool } from "./gateway-pool.js";
@@ -97,6 +98,11 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<void> {
   const pool = new GatewayPool(launch, { env, log });
 
   const settings = () => store.getSettings();
+  // 状态里的自启字段每次现查（launchctl print 很快），面板指示条才是实时的。
+  const readAutostart = (): { platform: "macos" | "unsupported"; installed: boolean; loaded: boolean } => {
+    const status = autostartStatus();
+    return { platform: status.platform, installed: status.plistInstalled, loaded: status.loaded };
+  };
   const runner = new JobRunner({
     store,
     settings,
@@ -123,6 +129,7 @@ export async function runDaemon(options: DaemonOptions = {}): Promise<void> {
       busyJobIds: scheduler.busyJobIds,
       activeSlots: limiter.activeCount,
       recentStarts: limiter.recentStartCount,
+      autostart: readAutostart(),
     }),
     log,
   });

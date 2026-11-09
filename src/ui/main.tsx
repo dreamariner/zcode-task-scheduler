@@ -54,6 +54,7 @@ interface DaemonStatusInfo {
   busyJobIds: string[];
   activeSlots: number;
   recentStarts: number;
+  autostart?: { platform: "macos" | "unsupported"; installed: boolean; loaded: boolean };
 }
 
 interface ModelEntry {
@@ -736,6 +737,40 @@ function App_(): JSX.Element {
               })()}
             </label>
           ) : null}
+          <div className="autostart-row">
+            <span className="hint">
+              {daemonStatus?.autostart?.platform === "unsupported"
+                ? "开机自启仅支持 macOS"
+                : daemonStatus?.autostart?.installed
+                  ? daemonStatus.autostart.loaded
+                    ? "开机自启已生效：重启后登录时自动拉起调度器"
+                    : "开机自启已安装但未加载，点「重新安装」刷新"
+                  : "开机自启未安装：重启后要等打开会话才会拉起调度器"}
+            </span>
+            {daemonStatus?.autostart?.platform !== "unsupported" ? (
+              daemonStatus?.autostart?.installed ? (
+                <button
+                  className="ghost danger"
+                  disabled={busy}
+                  onClick={() =>
+                    void withBusy(() => callTool("manage_autostart", { action: "remove" }))
+                  }
+                >
+                  卸载自启
+                </button>
+              ) : (
+                <button
+                  className="ghost"
+                  disabled={busy}
+                  onClick={() =>
+                    void withBusy(() => callTool("manage_autostart", { action: "install" }))
+                  }
+                >
+                  安装开机自启
+                </button>
+              )
+            ) : null}
+          </div>
         </section>
       ) : null}
 

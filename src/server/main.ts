@@ -399,7 +399,8 @@ export async function main(): Promise<void> {
   server.registerTool(
     "daemon_status",
     {
-      description: "查看调度器进程的运行状态（是否活着、CLI 来源、正在执行的任务）。",
+      description:
+        "查看调度器进程的运行状态（是否活着、CLI 来源、正在执行的任务、开机自启是否已装）。",
       inputSchema: {},
       annotations: { readOnlyHint: true },
       _meta: toolUi(),
@@ -407,6 +408,32 @@ export async function main(): Promise<void> {
     async () => {
       const result = await call<{ status: Record<string, unknown> }>("status");
       return textResult(JSON.stringify(result.status, null, 2), { status: result.status });
+    },
+  );
+
+  server.registerTool(
+    "manage_autostart",
+    {
+      description:
+        "安装或卸载开机自启（macOS LaunchAgent）。重启后调度器随登录自动拉起，不再依赖先打开会话。",
+      inputSchema: {
+        action: z.enum(["install", "remove"]).describe("install 安装，remove 卸载"),
+      },
+      // 会动系统的 launchd，只有面板可以调。
+      _meta: toolUi(["app"]),
+    },
+    async (input) => {
+      const action = input.action === "install" ? "install" : "remove";
+      const result = await call<{
+        status: { plistInstalled: boolean; loaded: boolean };
+      }>("autostart", { action });
+      const state = result.status;
+      return textResult(
+        action === "install"
+          ? `开机自启已安装${state.loaded ? "并生效" : ""}：重启后登录时会自动拉起调度器`
+          : "开机自启已卸载",
+        { status: state },
+      );
     },
   );
 

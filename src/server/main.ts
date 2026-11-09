@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { pluginRoot } from "../shared/paths.js";
 import { DaemonClient } from "./daemon-client.js";
+import { requireSessionId } from "./session-context.js";
 
 const SERVER_NAME = "zcode-task-scheduler";
 const SERVER_VERSION = "0.1.0";
@@ -168,6 +169,45 @@ export async function main(): Promise<void> {
       return textResult(`已登记任务 ${result.job.id}：${result.job.title}，下次执行 ${due}`, {
         job: result.job,
       });
+    },
+  );
+
+  server.registerTool(
+    "add_job_here",
+    {
+      description:
+        "在当前会话里给这个会话本身登记定时任务：目标自动取当前会话，不用也不能指定别的会话。",
+      inputSchema: {
+        title: z.string().optional().describe("任务标题"),
+        prompt: z.string().min(1).describe("要执行的任务内容，直接描述要完成的最终工作"),
+        scheduleKind: z.enum(["once", "daily", "weekly"]).optional().describe("once 一次性，daily 每天，weekly 每周"),
+        runAt: z.number().optional().describe("scheduleKind 为 once 时的绝对时刻（毫秒时间戳）"),
+        timeOfDay: z.number().optional().describe("每天几点（当天零点起的毫秒偏移），如 00:30 传 1800000"),
+        weekdays: z.array(z.number()).optional().describe("scheduleKind 为 weekly 时的星期（0 是周日）"),
+        maxAttempts: z.number().int().positive().optional().describe("含首次执行在内的最大尝试次数"),
+      },
+      _meta: toolUi(),
+    },
+    async (input, extra) => {
+      // 会话 id 由宿主随工具调用注入（_meta.session_id），模型与指令都拿不到自己的会话 id。
+      const sessionId = requireSessionId(extra?._meta);
+      const result = await call<{ job: { id: string; title: string; nextRunAt: number | null } }>(
+        "add_job",
+        {
+          ...workspaceParams(),
+          ...input,
+          targetKind: "session",
+          sessionId,
+          targetLabel: "当前会话",
+        },
+      );
+      const due = result.job.nextRunAt
+        ? new Date(result.job.nextRunAt).toLocaleString("zh-CN")
+        : "未排期";
+      return textResult(
+        `已把任务 ${result.job.id}（${result.job.title}）派到当前会话，下次执行 ${due}`,
+        { job: result.job },
+      );
     },
   );
 

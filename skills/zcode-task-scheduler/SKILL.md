@@ -20,7 +20,8 @@ description: Use when the user wants to schedule work for later, queue a task on
 |---|---|
 | `list_sessions` | 列工作区会话，用来挑执行目标 |
 | `list_jobs` | 列已登记的任务 |
-| `add_job` | 登记任务 |
+| `add_job` | 登记任务（目标要给会话 id 或新建会话） |
+| `add_job_here` | 给当前会话登记任务（目标自动取当前会话，只能在会话内用） |
 | `update_job` | 改期、改内容、停用 |
 | `remove_job` | 删除任务 |
 | `run_now` | 立即执行一轮 |
@@ -67,3 +68,4 @@ description: Use when the user wants to schedule work for later, queue a task on
 - `update_settings` 只有面板可以调，模型不要碰；任务会以无人值守方式全权限执行，登记前务必向用户复述一遍目标会话和时间。
 - 常驻任务连续 5 轮失败会被调度器自动停用，用户问起时说明这个行为。
 - 同一个会话的多个任务不会并发：调度器按面板顺序排队接力；用户抱怨「顺序不对」时提醒可以在面板用箭头调。
+- 用户想在某个会话里给自己派任务时用 `add_job_here`：会话 id 由宿主随工具调用注入，模型自己拿不到，不要用 `add_job` 硬填。

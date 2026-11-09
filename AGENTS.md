@@ -46,7 +46,7 @@ zcode-task-scheduler/
 │   ├── server/                   # MCP server 入口与 socket 客户端
 │   └── ui/                       # 侧栏面板（React + 官方 App 桥）
 ├── skills/zcode-task-scheduler/  # 教模型用这套工具
-├── commands/                     # /night:plan、/night:status
+├── commands/                     # /night-plan、/night-here、/night-status
 ├── scripts/                      # build / stage / 联调探针
 ├── tests/                        # vitest
 └── stage/                        # 可安装产物（构建生成，不入库）

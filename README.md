@@ -5,7 +5,7 @@ ZCode 夜间任务调度插件。给**已有会话**或**新建会话**预定任
 ## 它做什么
 
 - **面板**：ZCode 会话侧栏开一个「夜间调度」标签页，任务清单、新建任务、全局设置、运行日志都在里面。
-- **对话侧**：`/night:plan` 派单，`/night:status` 汇报。
+- **对话侧**：`/night-plan` 派单，`/night-here` 给当前会话派单，`/night-status` 汇报。
 - **执行**：后台调度器到点把任务投进目标会话；已有会话直接续跑，新会话到点新建。
 - **限流**：全局并发上限、每分钟启动数、相邻启动最小间隔、单次超时，都可在面板里改。
 - **失败续跑**：失败自动在**同一个会话**里重试，提示词带上次失败原因，模型接着做完。
@@ -78,6 +78,7 @@ pnpm typecheck
 pnpm test
 node scripts/e2e-probe.mjs /path/to/workspace <sessionId|new> "任务内容"
 node scripts/daemon-lifecycle-probe.mjs /path/to/workspace   # 验调度器能否扛住会话回收
+node scripts/add-here-probe.mjs /path/to/workspace           # 验会话内派任务（_meta 注入会话 id）
 ```
 
 改动协议相关代码时，先对照官方源码 `zai-org/ZCode`（本机检出路径自行替换）。

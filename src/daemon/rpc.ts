@@ -3,7 +3,6 @@ import { chmod, unlink } from "node:fs/promises";
 import type { SessionGateway } from "../protocol/gateway.js";
 import type { ModelCatalogEntry, WorkspaceRef } from "../protocol/session.js";
 import type { JobInput, JobPatch, JobStatus, Schedule, SchedulerSettings } from "../shared/types.js";
-import { autostartStatus, installAutostart, removeAutostart } from "./autostart.js";
 import type { JobStore } from "./db.js";
 import type { Scheduler } from "./scheduler.js";
 
@@ -21,8 +20,6 @@ export interface DaemonStatus {
   busyJobIds: string[];
   activeSlots: number;
   recentStarts: number;
-  /** 开机自启是否已安装并加载（非 macOS 恒为 false）。 */
-  autostart: { platform: "macos" | "unsupported"; installed: boolean; loaded: boolean };
 }
 
 export interface RpcContext {
@@ -260,19 +257,6 @@ export function createRpcHandlers(): Map<string, RpcHandler> {
     if (!ctx.status) throw new Error("daemon 未提供状态查询");
     return { status: ctx.status() };
   });
-
-  // 开机自启是面板能力：装/卸都会动 launchd，模型侧不该碰。
-  handlers.set("autostart", (params, ctx) => {
-    const action = optionalString(params, "action");
-    if (action !== "install" && action !== "remove") {
-      throw new Error("action 需要是 install 或 remove");
-    }
-    const log = (message: string): void => ctx.log(`开机自启：${message}`);
-    const status = action === "install" ? installAutostart({ log }) : removeAutostart({ log });
-    return { status };
-  });
-
-  handlers.set("autostart_status", () => ({ status: autostartStatus() }));
 
   return handlers;
 }

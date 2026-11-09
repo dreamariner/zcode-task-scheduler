@@ -144,6 +144,14 @@ try {
 } finally {
   child.stdin.end();
   child.kill();
+  // 探针的调度器是 detached 的（脱离进程树），要按 pidfile 单独收掉，不然空跑半小时才自退。
+  try {
+    const { readFileSync } = await import("node:fs");
+    const pid = Number(readFileSync(join(dataDir, "daemon.pid"), "utf8").trim());
+    if (Number.isInteger(pid) && pid > 0) process.kill(pid, "SIGTERM");
+  } catch {
+    // 没拉起来过就算了
+  }
   setTimeout(() => {
     rmSync(dataDir, { recursive: true, force: true });
     process.exit(failed ? 1 : 0);

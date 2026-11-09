@@ -123,4 +123,10 @@ for (let index = 0; index < 60; index += 1) {
 }
 
 child.kill("SIGTERM");
+// 同样收掉探针拉起的调度器（detached，不收会空跑半小时）。
+try {
+  const { readFileSync } = await import("node:fs");
+  const pid = Number(readFileSync(join(dataDir, "daemon.pid"), "utf8").trim());
+  if (Number.isInteger(pid) && pid > 0) process.kill(pid, "SIGTERM");
+} catch {}
 process.exit(0);

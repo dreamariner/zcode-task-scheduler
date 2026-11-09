@@ -155,7 +155,7 @@ export class JobRunner {
         await gateway.resumeSession(sessionId, this.workspaceFor(job));
       }
 
-      // 记下会话原来的权限模式，跑完恢复：夜间执行不该永久改掉用户的会话设置。
+      // 记下会话原来的权限模式，跑完恢复：无人值守执行不该永久改掉用户的会话设置。
       // 用户恰好在夜里手动改了模式的话会被恢复动作覆盖，这是可接受的取舍。
       priorMode = await this.currentMode(gateway, sessionId);
       await gateway.setMode(sessionId, "yolo");

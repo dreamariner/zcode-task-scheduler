@@ -377,7 +377,7 @@ function App_(): JSX.Element {
   return (
     <div className="panel">
       <header className="panel-head">
-        <h1>夜间调度</h1>
+        <h1>任务调度</h1>
         <button className="ghost" onClick={() => void refresh()} disabled={busy}>
           刷新
         </button>
@@ -517,7 +517,7 @@ function App_(): JSX.Element {
         <h2>新建任务</h2>
         <label>
           <span>标题</span>
-          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="夜间巡检" />
+          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="定时巡检" />
         </label>
 
         <label>
@@ -549,7 +549,7 @@ function App_(): JSX.Element {
             <input
               value={targetTitle}
               onChange={(e) => setTargetTitle(e.target.value)}
-              placeholder="夜间巡检报告"
+              placeholder="定时巡检报告"
             />
           </label>
         )}

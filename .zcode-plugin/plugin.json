@@ -1,7 +1,7 @@
 {
   "name": "zcode-task-scheduler",
   "version": "0.1.0",
-  "description": "夜间任务调度：给已有会话或新会话预定任务，半夜限流执行，失败在原会话续跑",
+  "description": "任务调度：给已有会话或新会话预定任务，到点限流执行，失败在原会话续跑",
   "author": { "name": "dreamariner" },
   "license": "Apache-2.0",
   "skills": "skills",
@@ -22,8 +22,8 @@
   "ui": {
     "surfaces": [
       {
-        "id": "night-scheduler",
-        "title": { "zh-CN": "夜间调度", "en-US": "Night Scheduler" },
+        "id": "scheduler",
+        "title": { "zh-CN": "任务调度", "en-US": "Task Scheduler" },
         "icon": "clock",
         "server": "scheduler",
         "resourceUri": "ui://zcode-task-scheduler/panel.html",

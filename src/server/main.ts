@@ -9,7 +9,7 @@ import { requireSessionId } from "./session-context.js";
 
 const SERVER_NAME = "zcode-task-scheduler";
 const SERVER_VERSION = "0.1.0";
-const SURFACE_ID = "night-scheduler";
+const SURFACE_ID = "scheduler";
 const PANEL_URI = `ui://${SERVER_NAME}/panel.html`;
 const HTML_MIME = "text/html;profile=mcp-app";
 
@@ -120,7 +120,7 @@ export async function main(): Promise<void> {
   server.registerTool(
     "list_jobs",
     {
-      description: "列出已登记的夜间任务。",
+      description: "列出已登记的定时任务。",
       inputSchema: {},
       annotations: { readOnlyHint: true },
       _meta: toolUi(),
@@ -316,7 +316,7 @@ export async function main(): Promise<void> {
   server.registerTool(
     "update_settings",
     {
-      description: "修改调度器的全局设置。只有面板可以调：改并发与速率会改变夜间执行的闸门，模型不应碰。",
+      description: "修改调度器的全局设置。只有面板可以调：改并发与速率会改变定时执行的闸门，模型不应碰。",
       inputSchema: {
         defaultTimeOfDay: z.number().optional().describe("每天几点（当天零点起的毫秒偏移）"),
         maxConcurrent: z.number().int().positive().optional().describe("全局并发上限"),
@@ -336,7 +336,7 @@ export async function main(): Promise<void> {
             "执行模型；providerId 与 modelId 都留空表示跟随会话默认，候选列表用 list_models 取",
           ),
       },
-      // 只对面板开放：模型侧被注入时不能靠改全局设置放大夜间执行的破坏面。
+      // 只对面板开放：模型侧被注入时不能靠改全局设置放大无人值守执行的破坏面。
       _meta: toolUi(["app"]),
     },
     async (input) => {
@@ -491,7 +491,7 @@ export async function main(): Promise<void> {
 
   await server.connect(new StdioServerTransport());
 
-  // 插件一加载就把调度器拉起来：任务是夜里执行的，不能等到用户点了工具才开工。
+  // 插件一加载就把调度器拉起来：到点就要能跑，不能等到用户点了工具才开工。
   // pidfile 单例锁保证只有第一个会话会真的拉起它。
   void getDaemon().catch((error) => {
     const message = error instanceof Error ? error.message : String(error);

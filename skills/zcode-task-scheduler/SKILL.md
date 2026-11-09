@@ -1,11 +1,11 @@
 ---
 name: zcode-task-scheduler
-description: Use when the user wants to schedule work for later, queue a task onto an existing conversation, run something overnight, or check what the night scheduler has queued. Covers the night-scheduler plugin's MCP tools for listing conversations, registering scheduled jobs, running them immediately, and inspecting run history.
+description: Use when the user wants to schedule work for later, queue a task onto an existing conversation, run something overnight, or check what the night scheduler has queued. Covers this task-scheduler plugin's MCP tools for listing conversations, registering scheduled jobs, running them immediately, and inspecting run history.
 ---
 
-# 夜间任务调度
+# 任务调度
 
-这个插件把「今晚要跑的事」登记成任务，到点由后台调度器执行。
+这个插件把「以后要跑的事」登记成任务，到点由后台调度器执行。
 
 ## 能力边界
 
@@ -43,7 +43,7 @@ description: Use when the user wants to schedule work for later, queue a task on
 {
   "name": "add_job",
   "arguments": {
-    "title": "夜间巡检",
+    "title": "定时巡检",
     "prompt": "巡检工作区的依赖更新情况，把结论写成一段简报。",
     "targetKind": "session",
     "sessionId": "sess_xxx",

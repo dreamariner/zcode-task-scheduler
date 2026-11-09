@@ -71,7 +71,7 @@ export interface SessionSummary {
 }
 
 export interface Settings {
-  /** 每晚默认执行时刻（当天零点起的毫秒偏移），默认 00:30。 */
+  /** 默认执行时刻（当天零点起的毫秒偏移），默认 00:30。 */
   defaultTimeOfDay: number;
   /** 全局并发上限。 */
   maxConcurrent: number;

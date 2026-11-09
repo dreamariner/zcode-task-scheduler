@@ -1,11 +1,11 @@
 # zcode-task-scheduler
 
-ZCode 夜间任务调度插件。给**已有会话**或**新建会话**预定任务，半夜限流执行，失败在原会话续跑。
+ZCode 任务调度插件。给**已有会话**或**新建会话**预定任务，到点限流执行，失败在原会话续跑；日夜皆可，夜间跑批只是典型用法。
 
 ## 它做什么
 
-- **面板**：ZCode 会话侧栏开一个「夜间调度」标签页，任务清单、新建任务、全局设置、运行日志都在里面。
-- **对话侧**：`/night-plan` 派单，`/night-here` 给当前会话派单，`/night-status` 汇报。
+- **面板**：ZCode 会话侧栏开一个「任务调度」标签页，任务清单、新建任务、全局设置、运行日志都在里面。
+- **对话侧**：`/schedule-plan` 派单，`/schedule-here` 给当前会话派单，`/schedule-status` 汇报。
 - **执行**：后台调度器到点把任务投进目标会话；已有会话直接续跑，新会话到点新建。
 - **限流**：全局并发上限、每分钟启动数、相邻启动最小间隔、单次超时，都可在面板里改。
 - **失败续跑**：失败自动在**同一个会话**里重试，提示词带上次失败原因，模型接着做完。
@@ -27,7 +27,7 @@ node "$CLI" plugins marketplace add "$PWD/stage" --scope user
 node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --scope user
 ```
 
-也可以走界面：**插件市场 → 添加 → 添加插件市场**，粘贴 `<仓库>/stage` 这个目录，然后 **个人 → zcode-task-scheduler-local → 夜间任务调度 → 安装**。
+也可以走界面：**插件市场 → 添加 → 添加插件市场**，粘贴 `<仓库>/stage` 这个目录，然后 **个人 → zcode-task-scheduler-local → 任务调度 → 安装**。
 
 改完源码要刷新市场快照再重装：
 
@@ -36,7 +36,7 @@ node "$CLI" plugins marketplace update zcode-task-scheduler-local
 node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --scope user
 ```
 
-装好后打开面板：**设置 → 插件 → 夜间调度 → 打开**，或在会话侧栏找到「夜间调度」标签页。
+装好后打开面板：**设置 → 插件 → 任务调度 → 打开**，或在会话侧栏找到「任务调度」标签页。
 
 > **重要**：插件的 MCP server 是在**会话创建时**被并进该会话的运行时配置的。先开会话、后装插件，这个会话里就没有本插件的 MCP server，面板会报 `MCP App connection is unavailable`。宿主也不会在插件 MCP server 意外断开后自动重连（连接池只在会话启动时连一次）。所以**重装插件、或插件 MCP server 掉线之后，已经开着的会话都要重载一次**（应用头部「重新加载会话」，或从侧栏重新打开该会话）才能用面板；新建的会话直接可用。
 
@@ -51,7 +51,7 @@ node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --sc
 
 对话里也可以直接派：
 
-> 把「巡检工作区的依赖更新情况」派到「夜间巡检」这个会话，每天 00:30 跑
+> 把「巡检工作区的依赖更新情况」派到「定时巡检」这个会话，每天 00:30 跑
 
 ## 行为说明
 
@@ -64,7 +64,7 @@ node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --sc
 - **同会话任务串行**：同一个会话的多个任务按面板顺序排队接力执行，绝不并发（宿主本来也会拒绝并发 prompt）；面板用箭头调整顺序，新任务排在队尾。
 - **熔断**：常驻任务连续 5 轮失败会自动停用，不再每晚空烧；修好后可在面板重新启用。
 - **权限**：执行时会临时把目标会话切到 yolo，跑完恢复成原来的模式。
-- **改全局设置只有面板能做**：`update_settings` 工具对模型不可见，避免被注入的会话放大夜间执行的闸门。
+- **改全局设置只有面板能做**：`update_settings` 工具对模型不可见，避免被注入的会话放大无人值守执行的闸门。
 - **错过窗口**：超过 24 小时仍未执行的任务会被跳过，不会补跑。
 - **执行模型不写死**：默认「跟随默认」，不下发 modelSelection，会话用自己的模型；也可在面板从当前可用模型里挑一个并配思考等级（列表取自工作区最近会话的运行时目录，缓存 5 分钟）。
 - **上下文成本**：派到长会话上，首轮消耗会非常大（实测 39 万 token）；派到专用会话只要 2.5 万。

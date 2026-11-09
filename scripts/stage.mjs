@@ -34,17 +34,17 @@ async function main() {
         name: "zcode-task-scheduler",
         source: "./zcode-task-scheduler",
         version: "0.1.0",
-        description: "夜间任务调度：给已有会话或新会话预定任务，半夜限流执行，失败在原会话续跑",
-        displayName: "夜间任务调度",
+        description: "任务调度：给已有会话或新会话预定任务，到点限流执行，失败在原会话续跑",
+        displayName: "任务调度",
         displayName_i18n: {
-          "zh-CN": "夜间任务调度",
-          "en-US": "Night Task Scheduler",
+          "zh-CN": "任务调度",
+          "en-US": "Task Scheduler",
         },
         description_i18n: {
           "zh-CN":
-            "夜间任务调度：给已有会话或新会话预定任务，半夜限流执行，失败在原会话续跑",
+            "任务调度：给已有会话或新会话预定任务，到点限流执行，失败在原会话续跑",
           "en-US":
-            "Schedule tasks for existing or new sessions, run them overnight with rate limits, and continue failed runs inside the same session",
+            "Schedule tasks for existing or new sessions, run them with rate limits, and continue failed runs inside the same session",
         },
         category: "productivity",
       },

@@ -4,11 +4,11 @@
 
 ## 项目定位
 
-ZCode 夜间任务调度插件。给**已有会话**或**新建会话**预定任务，到点由后台调度器执行；执行有闸门（并发上限、速率闸），失败会在**同一个会话**里续跑重试。
+ZCode 任务调度插件。给**已有会话**或**新建会话**预定任务，到点由后台调度器执行（日夜皆可）；执行有闸门（并发上限、速率闸），失败会在**同一个会话**里续跑重试。
 
 - 插件形态：一个 ZCode 插件（`ui.surfaces` 侧栏面板 + MCP server + skill + 斜杠命令）。
 - 执行引擎：独立常驻的 daemon 进程，通过 ZCode Protocol 驱动 ZCode 会话。
-- 需求与设计：见 `docs/issues/001-feat-夜间任务调度面板.md`。
+- 需求与设计：见 `docs/issues/001-feat-夜间任务调度面板.md`（立项时的旧称，现为任务调度）。
 - 远程：`git@github.com:dreamariner/zcode-task-scheduler.git`，branch `main`。
 - 挂载点：根仓 `dreamariner/zcode-task-scheduler/`（submodule）。
 
@@ -46,7 +46,7 @@ zcode-task-scheduler/
 │   ├── server/                   # MCP server 入口与 socket 客户端
 │   └── ui/                       # 侧栏面板（React + 官方 App 桥）
 ├── skills/zcode-task-scheduler/  # 教模型用这套工具
-├── commands/                     # /night-plan、/night-here、/night-status
+├── commands/                     # /schedule-plan、/schedule-here、/schedule-status
 ├── scripts/                      # build / stage / 联调探针
 ├── tests/                        # vitest
 └── stage/                        # 可安装产物（构建生成，不入库）

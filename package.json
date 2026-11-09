@@ -1,0 +1,35 @@
+{
+  "name": "zcode-task-scheduler",
+  "version": "0.1.0",
+  "description": "ZCode 夜间任务调度插件：给已有会话或新会话预定任务，半夜限流执行，失败在原会话续跑",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs && node scripts/stage.mjs",
+    "build:only": "node scripts/build.mjs",
+    "stage": "node scripts/stage.mjs",
+    "dev": "node scripts/build.mjs --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": ["esbuild"]
+  },
+  "devDependencies": {
+    "@modelcontextprotocol/ext-apps": "2.0.0",
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "esbuild": "^0.25.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0",
+    "zod": "^4.0.0"
+  }
+}

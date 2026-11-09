@@ -1,0 +1,245 @@
+:root {
+  color-scheme: light dark;
+  --fg: #1c1c1e;
+  --muted: #6b6b70;
+  --bg: transparent;
+  --card: rgba(127, 127, 127, 0.08);
+  --line: rgba(127, 127, 127, 0.24);
+  --accent: #3b6ef5;
+  --ok: #1a7f4b;
+  --warn: #a2620a;
+  --bad: #b3261e;
+  --busy: #3b6ef5;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e8e8ea;
+    --muted: #9a9aa0;
+    --card: rgba(127, 127, 127, 0.14);
+    --line: rgba(127, 127, 127, 0.28);
+    --accent: #7aa2ff;
+    --ok: #5fd39a;
+    --warn: #f0b354;
+    --bad: #ff7b72;
+    --busy: #7aa2ff;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  padding: 12px;
+  color: var(--fg);
+  background: var(--bg);
+  font:
+    13px/1.5 system-ui,
+    -apple-system,
+    "PingFang SC",
+    sans-serif;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.panel-head h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.block h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--muted);
+  letter-spacing: 0.04em;
+}
+
+.banner {
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  background: var(--card);
+}
+
+.banner.error {
+  color: var(--bad);
+  border: 1px solid var(--bad);
+}
+
+.empty,
+.hint {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.job,
+.runs li {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px;
+  background: var(--card);
+}
+
+.job {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.job-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.job-title {
+  font-weight: 600;
+}
+
+.job-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.job-error {
+  color: var(--bad);
+  font-size: 12px;
+  word-break: break-word;
+}
+
+.badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  font-size: 11px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.badge.ok {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.badge.warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.badge.bad {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+.badge.busy {
+  color: var(--busy);
+  border-color: var(--busy);
+}
+
+.job-actions {
+  display: flex;
+  gap: 6px;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+input,
+select,
+textarea {
+  font: inherit;
+  color: var(--fg);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 8px;
+  width: 100%;
+}
+
+textarea {
+  resize: vertical;
+}
+
+button {
+  font: inherit;
+  border-radius: 8px;
+  padding: 5px 12px;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg);
+}
+
+button.primary {
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+  align-self: flex-start;
+}
+
+button.danger {
+  color: var(--bad);
+  border-color: var(--bad);
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+}
+
+.runs li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.run-meta {
+  color: var(--muted);
+  font-size: 12px;
+}

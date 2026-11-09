@@ -1,0 +1,46 @@
+{
+  "name": "zcode-task-scheduler",
+  "version": "0.1.0",
+  "description": "夜间任务调度：给已有会话或新会话预定任务，半夜限流执行，失败在原会话续跑",
+  "author": { "name": "dreamariner" },
+  "license": "Apache-2.0",
+  "skills": "skills",
+  "commands": "commands",
+  "mcpServers": {
+    "scheduler": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${ZCODE_PLUGIN_ROOT}/dist/server.mjs"],
+      "cwd": "${ZCODE_PROJECT_DIR}",
+      "env": {
+        "ZCODE_WORKSPACE_ROOT": "${ZCODE_PROJECT_DIR}",
+        "ZCODE_PLUGIN_DATA": "${ZCODE_PLUGIN_DATA}",
+        "ZCODE_CLI_PATH": "${user_config.cliPath}"
+      }
+    }
+  },
+  "ui": {
+    "surfaces": [
+      {
+        "id": "night-scheduler",
+        "title": { "zh-CN": "夜间调度", "en-US": "Night Scheduler" },
+        "icon": "clock",
+        "server": "scheduler",
+        "resourceUri": "ui://zcode-task-scheduler/panel.html",
+        "availability": "session"
+      }
+    ]
+  },
+  "userConfig": {
+    "cliPath": {
+      "type": "file",
+      "title": { "zh-CN": "ZCode CLI 路径", "en-US": "ZCode CLI path" },
+      "description": {
+        "zh-CN": "auto 表示自动探测桌面端内置 CLI，也可填 zcode 可执行文件或 zcode.cjs 的绝对路径",
+        "en-US": "auto means auto-detect the bundled CLI; a zcode executable or an absolute path to zcode.cjs also works"
+      },
+      "default": "auto",
+      "required": false
+    }
+  }
+}

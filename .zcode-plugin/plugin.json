@@ -34,11 +34,8 @@
   "userConfig": {
     "cliPath": {
       "type": "file",
-      "title": { "zh-CN": "ZCode CLI 路径", "en-US": "ZCode CLI path" },
-      "description": {
-        "zh-CN": "auto 表示自动探测桌面端内置 CLI，也可填 zcode 可执行文件或 zcode.cjs 的绝对路径",
-        "en-US": "auto means auto-detect the bundled CLI; a zcode executable or an absolute path to zcode.cjs also works"
-      },
+      "title": "ZCode CLI 路径",
+      "description": "auto 表示自动探测桌面端内置 CLI，也可填 zcode 可执行文件或 zcode.cjs 的绝对路径",
       "default": "auto",
       "required": false
     }

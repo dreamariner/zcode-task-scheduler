@@ -198,7 +198,7 @@ function App_(): JSX.Element {
   const [editTime, setEditTime] = useState("00:30");
   const [editWeekdays, setEditWeekdays] = useState<number[]>([0]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (manual = false) => {
     try {
       const [jobResult, sessionResult, statusResult, settingResult, modelResult, daemonResult] =
         await Promise.all([
@@ -206,7 +206,7 @@ function App_(): JSX.Element {
           callTool("list_sessions") as Promise<{ sessions: SessionSummary[] }>,
           callTool("job_status") as Promise<{ runs: RunRecord[] }>,
           callTool("get_settings") as Promise<{ settings: Settings }>,
-          callTool("list_models")
+          callTool("list_models", manual ? { refresh: true } : {})
             .then((result) => (result as { models?: ModelEntry[] }).models ?? [])
             .catch(() => []),
           callTool("daemon_status")
@@ -378,7 +378,7 @@ function App_(): JSX.Element {
     <div className="panel">
       <header className="panel-head">
         <h1>任务调度</h1>
-        <button className="ghost" onClick={() => void refresh()} disabled={busy}>
+        <button className="ghost" onClick={() => void refresh(true)} disabled={busy}>
           刷新
         </button>
       </header>
@@ -682,16 +682,16 @@ function App_(): JSX.Element {
               onChange={(e) => changeModel(e.target.value)}
             >
               <option value="default">跟随默认</option>
-              {models
-                .filter((model) => !model.disabledReason)
-                .map((model) => (
-                  <option
-                    key={`${model.providerId}/${model.modelId}`}
-                    value={`${model.providerId}/${model.modelId}`}
-                  >
-                    {(model.providerLabel ?? model.providerId)} · {model.label}
-                  </option>
-                ))}
+              {models.map((model) => (
+                <option
+                  key={`${model.providerId}/${model.modelId}`}
+                  value={`${model.providerId}/${model.modelId}`}
+                  disabled={Boolean(model.disabledReason)}
+                >
+                  {(model.providerLabel ?? model.providerId)} · {model.label}
+                  {model.disabledReason ? `（不可用：${model.disabledReason}）` : ""}
+                </option>
+              ))}
               {settings.model.modelId &&
               !models.some(
                 (model) =>

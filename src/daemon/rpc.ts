@@ -195,7 +195,10 @@ export function createRpcHandlers(): Map<string, RpcHandler> {
 
   handlers.set("list_models", async (params, ctx) => {
     const workspace = workspaceFrom(params);
-    const cached = modelCache.get(workspace.workspaceKey);
+    // 面板的「刷新」按钮带 refresh=true：用户刚改完供应商配置就该看到新目录，
+    // 不必等 5 分钟缓存过期。
+    const skipCache = params.refresh === true;
+    const cached = skipCache ? undefined : modelCache.get(workspace.workspaceKey);
     if (cached && Date.now() - cached.at < MODEL_CACHE_TTL_MS) {
       return { models: cached.models };
     }

@@ -349,12 +349,17 @@ export async function main(): Promise<void> {
     "list_models",
     {
       description: "列出当前可用的模型（取自会话运行时的模型目录），用来给执行模型挑一个。",
-      inputSchema: {},
+      inputSchema: {
+        refresh: z.boolean().optional().describe("true 跳过 5 分钟缓存，重新向会话运行时取目录"),
+      },
       annotations: { readOnlyHint: true },
       _meta: toolUi(),
     },
-    async () => {
-      const result = await call<{ models: unknown[] }>("list_models", workspaceParams());
+    async (input) => {
+      const result = await call<{ models: unknown[] }>("list_models", {
+        ...workspaceParams(),
+        ...(input.refresh === true ? { refresh: true } : {}),
+      });
       const models = result.models ?? [];
       const lines = models.map((entry) => {
         const item = entry as {

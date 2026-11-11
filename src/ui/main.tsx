@@ -704,6 +704,11 @@ function App_(): JSX.Element {
               ) : null}
             </select>
           </label>
+          <p className="hint">
+            列表来自 daemon 自己拉起的 CLI 进程的模型目录。账号型供应商（Start
+            Plan 等订阅账号模型）的可用事实与鉴权都由桌面端宿主注入，无人值守执行拿不到，所以不在列表里；同名模型请选
+            API 型供应商（如 bigmodel-standard-api，按 API 计费）。
+          </p>
           {settings.model.modelId ? (
             <label>
               <span>思考等级</span>

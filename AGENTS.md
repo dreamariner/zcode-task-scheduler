@@ -88,3 +88,4 @@ node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --sc
 - **宿主回收会话级 MCP server 时按 PPID 树杀整棵子树**（SIGINT → SIGTERM → SIGKILL，见官方 `apps/zcode-cli/packages/adapters/src/mcp/process-tree.ts`）。调度器必须用两次 fork 脱离这棵树，否则会话一关，夜里就没人干活了。
 - **第三方插件声明的 `isolation` 会被忽略**（官方源才认），插件 MCP server 一律会话级；最后一个租约释放 30 秒后连接关闭、子进程被杀。
 - **面板只能开在会话侧栏**，`availability` 只接受 `session`；页面没有任何会话 API，切不了也建不了宿主会话。
+- **账号型模型（Start Plan 等订阅账号）天然不在模型目录里，别试图修**。账号供应商在磁盘 builtin 配置里只是声明壳（`entitled` 为空不发布模型）；`entitled: true`、当前连接状态和每次请求的鉴权头全由桌面端宿主运行时注入（宿主推 `provider/updateAccountConfig` 账号快照；CLI 执行账号模型前经 `interaction/requestProviderRuntimeHeaders` 反查宿主拿鉴权头）。daemon 拉起的 CLI 进程树里没有宿主，账号覆盖为空（fail-closed），目录里就没有 account: 条目；显式下发会在 `session/send` 被「Provider Registry 中不存在 Model」拒绝。桌面端独立 headless CLI 同样不行：其账号目录只管 `individual-coding-plan` 模式的供应商，Start Plan 是宿主专属。可选模型的实际能力域就是 API 型供应商（用户配了 key 的那些）。

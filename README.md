@@ -67,6 +67,7 @@ node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --sc
 - **改全局设置只有面板能做**：`update_settings` 工具对模型不可见，避免被注入的会话放大无人值守执行的闸门。
 - **错过窗口**：超过 24 小时仍未执行的任务会被跳过，不会补跑。
 - **执行模型不写死**：默认「跟随默认」，不下发 modelSelection，会话用自己的模型；也可在面板从当前可用模型里挑一个并配思考等级（列表取自工作区最近会话的运行时目录，缓存 5 分钟）。
+- **账号型模型（Start Plan 等订阅账号）不在可选列表里**：模型列表来自 daemon 自己拉起的 CLI 进程的注册表，而账号型供应商的可用事实（订阅权益、当前连接）和每次请求的鉴权头都由桌面端宿主注入：宿主通过 `provider/updateAccountConfig` 推送账号快照，CLI 执行账号模型前再经 `interaction/requestProviderRuntimeHeaders` 向宿主反查鉴权头。无人值守进程没有宿主可问，账号供应商按 fail-closed 只剩空壳（实测：目录里没有 account: 条目；显式下发 `account:bigmodel-start-plan/GLM-5.3-Flash` 会被 `session/send` 拒绝「Provider Registry 中不存在 Model」）。想跑 GLM 系模型选 `bigmodel-standard-api` 下的同名模型（按 API 计费）。桌面端独立 headless CLI 也一样：其账号目录只管 `individual-coding-plan` 模式，Start Plan 同样不可用，会回退到默认模型。
 - **上下文成本**：派到长会话上，首轮消耗会非常大（实测 39 万 token）；派到专用会话只要 2.5 万。
 - **CLI 路径**：默认自动探测桌面端内置的 ZCode CLI；可在插件配置里指定（填 `auto` 表示自动探测）。
 - **桌面端侧栏可见性是补写出来的**：daemon 新建的会话靠直写宿主的 tasks-index 库进侧栏，这是对宿主非公开接口的耦合；宿主改表结构时会静默失效（已有列检测兜底），代价只是侧栏看不见，执行不受影响。
@@ -79,6 +80,7 @@ pnpm test
 node scripts/e2e-probe.mjs /path/to/workspace <sessionId|new> "任务内容"
 node scripts/daemon-lifecycle-probe.mjs /path/to/workspace   # 验调度器能否扛住会话回收
 node scripts/add-here-probe.mjs /path/to/workspace           # 验会话内派任务（_meta 注入会话 id）
+node scripts/model-catalog-probe.mjs                         # 验模型目录边界（账号型供应商缺席）
 ```
 
 改动协议相关代码时，先对照官方源码 `zai-org/ZCode`（本机检出路径自行替换）。

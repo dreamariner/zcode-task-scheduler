@@ -171,8 +171,12 @@ try {
   for (const entry of available) {
     const providerId = entry?.ref?.providerId ?? "?";
     const modelId = entry?.ref?.modelId ?? "?";
+    const levels = (entry?.reasoning?.levels ?? [])
+      .map((level) => level?.value)
+      .filter(Boolean);
+    const suffix = levels.length > 0 ? `（思考等级：${levels.join("/")}，默认 ${entry?.reasoning?.defaultLevel ?? "无"}）` : "";
     if (!providers.has(providerId)) providers.set(providerId, []);
-    providers.get(providerId).push(modelId);
+    providers.get(providerId).push(`${modelId}${suffix}`);
   }
   console.log("[probe] 目录供应商：");
   for (const [providerId, models] of providers) {

@@ -53,6 +53,9 @@ const app = new App(
   { autoResize: true },
 );
 
+/** 构建时由 esbuild define 注入；与会话里 server 的构建号比对用。 */
+const PANEL_BUILD_ID = process.env.ZTS_BUILD_ID;
+
 async function callTool(name: string, args: Record<string, unknown> = {}): Promise<unknown> {
   const result = await app.callServerTool({ name, arguments: args });
   const structured = (result as { structuredContent?: unknown }).structuredContent;
@@ -244,6 +247,7 @@ function App_(): JSX.Element {
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [runs, setRuns] = useState<RunRecord[]>([]);
   const [concurrency, setConcurrency] = useState<ConcurrencyInfo | null>(null);
+  const [versionMismatch, setVersionMismatch] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -277,15 +281,19 @@ function App_(): JSX.Element {
 
   const refresh = useCallback(async () => {
     try {
-      const [jobResult, sessionResult, statusResult] = await Promise.all([
+      const [jobResult, sessionResult, statusResult, pingResult] = await Promise.all([
         callTool("list_jobs") as Promise<{ jobs: Job[]; concurrency?: ConcurrencyInfo }>,
         callTool("list_sessions") as Promise<{ sessions: SessionSummary[] }>,
         callTool("job_status") as Promise<{ runs: RunRecord[]; concurrency?: ConcurrencyInfo }>,
+        // 版本对齐：server 没有 ping（旧版）或构建号不一致都算错配。错配时旧 server
+        // 会把新参数静默剥掉，所以下面把写操作一并禁掉。
+        callTool("ping").catch(() => null) as Promise<{ buildId?: string } | null>,
       ]);
       setJobs(jobResult.jobs ?? []);
       setSessions(sessionResult.sessions ?? []);
       setRuns(statusResult.runs ?? []);
       setConcurrency(jobResult.concurrency ?? statusResult.concurrency ?? null);
+      setVersionMismatch(!pingResult || pingResult.buildId !== PANEL_BUILD_ID);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -477,6 +485,12 @@ function App_(): JSX.Element {
       </div>
 
       {error ? <div className="banner error">{error}</div> : null}
+      {versionMismatch ? (
+        <div className="banner warn">
+          面板与执行端版本不一致：面板是新版，但这个会话里的执行端是旧版，编辑和新建会被旧端静默忽略参数。
+          请在应用头部「重新加载会话」后使用。
+        </div>
+      ) : null}
 
       <section className="block">
         <h2>任务清单</h2>
@@ -626,7 +640,7 @@ function App_(): JSX.Element {
                         </div>
                       ) : null}
                       <div className="job-actions">
-                        <button className="primary" disabled={busy} onClick={() => void saveEdit()}>
+                        <button className="primary" disabled={busy || versionMismatch} onClick={() => void saveEdit()}>
                           保存
                         </button>
                         <button className="ghost" disabled={busy} onClick={() => setEditingJobId(null)}>
@@ -833,7 +847,7 @@ function App_(): JSX.Element {
 
         <button
           className="primary"
-          disabled={busy || !prompt.trim() || (targetKind === "session" && !sessionId)}
+          disabled={busy || versionMismatch || !prompt.trim() || (targetKind === "session" && !sessionId)}
           onClick={() => void submit()}
         >
           登记

@@ -180,6 +180,20 @@ export async function main(): Promise<void> {
 
   // ── 工具 ──
 
+  // 版本探针：面板 HTML 每次渲染从磁盘现读，server 却在会话创建时进内存。
+  // 重装插件后两者可能错版本，旧 server 会把新参数静默剥掉（zod 默认剥离）。
+  // 面板启动时 ping 一下对构建号，不一致就显 banner 并禁掉写操作。
+  server.registerTool(
+    "ping",
+    {
+      description: "版本探针：返回本 server 的构建号，供面板与自己的构建号比对。",
+      inputSchema: {},
+      annotations: { readOnlyHint: true },
+      _meta: toolUi(),
+    },
+    async () => textResult(`build ${process.env.ZTS_BUILD_ID ?? "unknown"}`, { buildId: process.env.ZTS_BUILD_ID ?? "unknown" }),
+  );
+
   server.registerTool(
     "list_sessions",
     {

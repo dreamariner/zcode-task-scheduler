@@ -84,6 +84,7 @@ node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --sc
 ## 踩过的坑（宿主行为，改代码前先看这里）
 
 - **插件 MCP server 只在会话创建时并进运行时配置**。先开会话、后装插件（或重装插件），那个会话里就没有本插件的 MCP server，面板直接报 `MCP App connection is unavailable`。宿主不会自动刷新已开会话的 MCP 配置，只能重建会话运行时（应用头部「重新加载会话」，或重新打开该会话）。
+- **重装后面板与 server 可能错版本，且错得毫无声息**（2026-11-12 实测事故）：面板 HTML 是渲染时从磁盘现读的，重装后立刻显示新版；server 却是会话创建时加载进内存的旧版。用户在新编辑框里改模型，旧 `update_job` 的 zod schema 把新参数静默剥掉，排期写进了、模型原样，界面还不报错。对策：构建时给面板与 server 各注入一个 BUILD_ID，server 暴露 `ping` 工具，面板每次刷新比对，不一致就显横幅并禁掉写操作。
 - **宿主回收会话级 MCP server 时按 PPID 树杀整棵子树**（SIGINT → SIGTERM → SIGKILL，见官方 `apps/zcode-cli/packages/adapters/src/mcp/process-tree.ts`）。
 - **第三方插件声明的 `isolation` 会被忽略**（官方源才认），插件 MCP server 一律会话级。
 - **面板只能开在会话侧栏**，`availability` 只接受 `session`；页面没有任何会话 API。

@@ -86,6 +86,11 @@ body {
   border: 1px solid var(--bad);
 }
 
+.banner.warn {
+  color: var(--warn, #d97706);
+  border: 1px solid var(--warn, #d97706);
+}
+
 .empty,
 .hint {
   margin: 0;

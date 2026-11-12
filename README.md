@@ -39,6 +39,8 @@ node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --sc
 装好后打开面板：**设置 → 插件 → 任务调度 → 打开**，或在会话侧栏找到「任务调度」标签页。
 
 > **重要**：插件的 MCP server 是在**会话创建时**被并进该会话的运行时配置的。先开会话、后装插件，这个会话里就没有本插件的 MCP server，面板会报 `MCP App connection is unavailable`。宿主也不会在插件 MCP server 意外断开后自动重连（连接池只在会话启动时连一次）。所以**重装插件、或插件 MCP server 掉线之后，已经开着的会话都要重载一次**（应用头部「重新加载会话」，或从侧栏重新打开该会话）才能用面板；新建的会话直接可用。
+>
+> 面板会自己对版本：重装后面板 HTML 是新的、会话里的 server 还是旧版时，面板顶部会显示「版本不一致」横幅并禁用登记与保存，避免改动被旧端静默忽略。
 
 ## 用法
 

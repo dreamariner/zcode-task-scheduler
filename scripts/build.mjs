@@ -12,6 +12,14 @@ const banner = {
   js: 'import { createRequire as __createRequire } from "node:module"; const require=__createRequire(import.meta.url);',
 };
 
+/**
+ * 构建时间戳：面板与 server 各注入一份，面板用它判断会话里的执行端是不是同一版构建。
+ * 背景：面板 HTML 每次渲染从磁盘现读，server 却在会话创建时加载进内存，
+ * 重装插件后两者可能错版本；错版本时旧 server 会把新参数静默剥掉（zod 默认剥离）。
+ */
+const BUILD_ID = String(Date.now());
+const define = { "process.env.ZTS_BUILD_ID": JSON.stringify(BUILD_ID) };
+
 async function buildNode(entry, outfile) {
   return build({
     entryPoints: [join(root, entry)],
@@ -21,6 +29,7 @@ async function buildNode(entry, outfile) {
     format: "esm",
     target: "node24",
     banner,
+    define,
     sourcemap: false,
     logLevel: "info",
   });
@@ -35,6 +44,7 @@ async function buildUi() {
     platform: "browser",
     target: "es2022",
     jsx: "automatic",
+    define,
     sourcemap: false,
     logLevel: "info",
   });
@@ -65,6 +75,7 @@ async function main() {
       format: "esm",
       target: "node24",
       banner,
+      define,
       logLevel: "info",
     });
     await ctx.watch();

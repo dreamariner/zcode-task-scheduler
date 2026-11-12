@@ -5,65 +5,39 @@ import { App } from "@modelcontextprotocol/ext-apps";
 interface SessionSummary {
   sessionId: string;
   title: string;
-  status: string;
   updatedAt: number | null;
 }
 
 interface Job {
-  id: string;
+  automationId: string;
   title: string;
-  target: { kind: "session" | "new-session"; sessionId?: string; title?: string; label?: string };
   prompt: string;
+  targetSessionId: string | null;
+  workspaceKey: string;
+  workspacePath: string;
   schedule: { kind: "once" | "daily" | "weekly"; runAt?: number; timeOfDay?: number; weekdays?: number[] };
   enabled: boolean;
-  maxAttempts: number;
+  cronExpr: string;
   nextRunAt: number | null;
-  lastStatus: string | null;
   lastRunAt: number | null;
   lastError: string | null;
-  consecutiveFailures: number;
+  lifecycleStatus: string;
+  running: boolean;
+  dispatchStatus: string;
+  runCount: number;
+  modelSelection: string | null;
 }
 
 interface RunRecord {
-  id: number;
-  jobId: string;
-  attempt: number;
+  runId: string;
+  automationId: string;
+  trigger: string;
+  outcome: string | null;
+  error: string | null;
   sessionId: string | null;
-  startedAt: number;
-  endedAt: number | null;
-  status: string;
-  errorCode: string | null;
-  errorMessage: string | null;
-}
-
-interface Settings {
-  defaultTimeOfDay: number;
-  maxConcurrent: number;
-  maxStartsPerMinute: number;
-  minGapMs: number;
-  taskTimeoutMs: number;
-  maxRetries: number;
-  retryBackoffMs: number;
-  model: { providerId: string; modelId: string; options?: { reasoningLevel?: string } };
-}
-
-interface DaemonStatusInfo {
-  pid: number;
-  startedAt: number;
-  launchSource: string;
-  busyJobIds: string[];
-  activeSlots: number;
-  recentStarts: number;
-}
-
-interface ModelEntry {
-  providerId: string;
-  modelId: string;
-  label: string;
-  providerLabel?: string;
-  reasoningLevels: string[];
-  reasoningDefault?: string;
-  disabledReason?: string;
+  attempts: number;
+  scheduledAt: number | null;
+  createdAt: number;
 }
 
 const app = new App(
@@ -119,29 +93,55 @@ function describeSchedule(job: Job): string {
     return schedule.runAt ? `一次性 · ${formatTime(schedule.runAt)}` : "一次性";
   }
   if (schedule.kind === "weekly") {
-    const days = (schedule.weekdays ?? [])
-      .map((d) => WEEKDAY_NAMES[d] ?? String(d))
-      .join("、");
+    const days = (schedule.weekdays ?? []).map((d) => WEEKDAY_NAMES[d] ?? String(d)).join("、");
     return `每周${days || "日"} ${formatClock(schedule.timeOfDay)}`;
   }
   return `每天 ${formatClock(schedule.timeOfDay)}`;
 }
 
 function describeTarget(job: Job, sessions: SessionSummary[]): string {
-  if (job.target.kind === "new-session") {
-    return `新建会话${job.target.title ? `：${job.target.title}` : ""}`;
-  }
-  const session = sessions.find((item) => item.sessionId === job.target.sessionId);
-  return `已有会话${session?.title ? `：${session.title}` : `：${job.target.sessionId}`}`;
+  if (!job.targetSessionId) return "到点时新建会话";
+  const session = sessions.find((item) => item.sessionId === job.targetSessionId);
+  return `已有会话${session?.title ? `：${session.title}` : `：${job.targetSessionId}`}`;
 }
 
-const STATUS_TONE: Record<string, string> = {
+/** 执行模型：桌面端 model_selection 为字面量 "null" 表示跟随工作区首选。 */
+function describeModel(job: Job): string {
+  if (!job.modelSelection || job.modelSelection === "null") return "跟随会话当前模型";
+  try {
+    const parsed = JSON.parse(job.modelSelection) as {
+      providerId?: string;
+      modelId?: string;
+      options?: { reasoningLevel?: string };
+    };
+    const base = `${parsed.providerId ?? ""}/${parsed.modelId ?? ""}`;
+    return parsed.options?.reasoningLevel
+      ? `${base}（思考 ${parsed.options.reasoningLevel}）`
+      : base;
+  } catch {
+    return "跟随会话当前模型";
+  }
+}
+
+/** 任务状态徽标：优先用桌面端回写的生命周期与在途状态。 */
+function jobStatus(job: Job): { tone: string; text: string } {
+  if (!job.enabled) return { tone: "idle", text: "已停用" };
+  if (job.lifecycleStatus === "completed") return { tone: "ok", text: "已完成" };
+  if (job.lifecycleStatus === "failed") return { tone: "bad", text: "已失败" };
+  if (job.running) return { tone: "busy", text: "执行中" };
+  if (job.lastRunAt) return { tone: "ok", text: "已执行" };
+  return { tone: "idle", text: "待执行" };
+}
+
+const RUN_TONE: Record<string, string> = {
+  success: "ok",
   succeeded: "ok",
+  completed: "ok",
   failed: "bad",
-  retrying: "warn",
+  error: "bad",
+  skipped: "warn",
   running: "busy",
-  scheduled: "idle",
-  disabled: "idle",
+  pending: "idle",
 };
 
 const WEEKDAY_NAMES = ["日", "一", "二", "三", "四", "五", "六"] as const;
@@ -176,9 +176,6 @@ function App_(): JSX.Element {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [runs, setRuns] = useState<RunRecord[]>([]);
-  const [settings, setSettings] = useState<Settings | null>(null);
-  const [models, setModels] = useState<ModelEntry[]>([]);
-  const [daemonStatus, setDaemonStatus] = useState<DaemonStatusInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -191,6 +188,10 @@ function App_(): JSX.Element {
   const [runAt, setRunAt] = useState("");
   const [timeOfDay, setTimeOfDay] = useState("00:30");
   const [weekdays, setWeekdays] = useState<number[]>([0]);
+  const [modelMode, setModelMode] = useState<"minimax" | "follow" | "custom">("minimax");
+  const [modelProvider, setModelProvider] = useState("");
+  const [modelId, setModelId] = useState("");
+  const [reasoningLevel, setReasoningLevel] = useState("max");
 
   const [editingJobId, setEditingJobId] = useState<string | null>(null);
   const [editKind, setEditKind] = useState<"once" | "daily" | "weekly">("daily");
@@ -198,27 +199,16 @@ function App_(): JSX.Element {
   const [editTime, setEditTime] = useState("00:30");
   const [editWeekdays, setEditWeekdays] = useState<number[]>([0]);
 
-  const refresh = useCallback(async (manual = false) => {
+  const refresh = useCallback(async () => {
     try {
-      const [jobResult, sessionResult, statusResult, settingResult, modelResult, daemonResult] =
-        await Promise.all([
-          callTool("list_jobs") as Promise<{ jobs: Job[] }>,
-          callTool("list_sessions") as Promise<{ sessions: SessionSummary[] }>,
-          callTool("job_status") as Promise<{ runs: RunRecord[] }>,
-          callTool("get_settings") as Promise<{ settings: Settings }>,
-          callTool("list_models", manual ? { refresh: true } : {})
-            .then((result) => (result as { models?: ModelEntry[] }).models ?? [])
-            .catch(() => []),
-          callTool("daemon_status")
-            .then((result) => (result as { status?: DaemonStatusInfo }).status ?? null)
-            .catch(() => null),
-        ]);
+      const [jobResult, sessionResult, statusResult] = await Promise.all([
+        callTool("list_jobs") as Promise<{ jobs: Job[] }>,
+        callTool("list_sessions") as Promise<{ sessions: SessionSummary[] }>,
+        callTool("job_status") as Promise<{ runs: RunRecord[] }>,
+      ]);
       setJobs(jobResult.jobs ?? []);
       setSessions(sessionResult.sessions ?? []);
       setRuns(statusResult.runs ?? []);
-      setSettings(settingResult.settings);
-      setModels(modelResult);
-      setDaemonStatus(daemonResult);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -266,17 +256,45 @@ function App_(): JSX.Element {
           ? { runAt: new Date(runAt).getTime() }
           : { timeOfDay: parseClock(timeOfDay) ?? 0 }),
         ...(scheduleKind === "weekly" ? { weekdays } : {}),
+        ...(modelMode === "follow"
+          ? { followSessionModel: true }
+          : modelMode === "custom" && modelProvider.trim() && modelId.trim()
+            ? {
+                model: {
+                  providerId: modelProvider.trim(),
+                  modelId: modelId.trim(),
+                  reasoningLevel: reasoningLevel.trim() || "max",
+                },
+              }
+            : {}),
       });
       setTitle("");
       setPrompt("");
       setRunAt("");
     });
-  }, [withBusy, title, prompt, targetKind, sessionId, targetTitle, scheduleKind, runAt, timeOfDay, weekdays]);
+  }, [
+    withBusy,
+    title,
+    prompt,
+    targetKind,
+    sessionId,
+    targetTitle,
+    scheduleKind,
+    runAt,
+    timeOfDay,
+    weekdays,
+    modelMode,
+    modelProvider,
+    modelId,
+    reasoningLevel,
+  ]);
 
   const startEdit = useCallback((job: Job) => {
-    setEditingJobId(job.id);
+    setEditingJobId(job.automationId);
     setEditKind(job.schedule.kind);
-    setEditRunAt(job.schedule.kind === "once" && job.schedule.runAt ? toLocalInput(job.schedule.runAt) : "");
+    setEditRunAt(
+      job.schedule.kind === "once" && job.schedule.runAt ? toLocalInput(job.schedule.runAt) : "",
+    );
     setEditTime(formatClock(job.schedule.timeOfDay));
     setEditWeekdays(job.schedule.weekdays ?? [0]);
   }, []);
@@ -301,70 +319,6 @@ function App_(): JSX.Element {
     });
   }, [withBusy, editingJobId, editKind, editRunAt, editTime, editWeekdays]);
 
-  /** 设置项守卫：清空输入框的瞬间会发出 NaN 或 0，直接拦下不发。 */
-  const changeSetting = useCallback(
-    (key: string, raw: string, min: number): void => {
-      const value = Number(raw);
-      if (!Number.isFinite(value) || value < min) return;
-      void withBusy(() => callTool("update_settings", { [key]: value }));
-    },
-    [withBusy],
-  );
-
-  /** 切执行模型；换模型时思考等级重置为该模型的默认档。空键表示跟随默认。 */
-  const changeModel = useCallback(
-    (key: string) => {
-      if (key === "default") {
-        void withBusy(() =>
-          callTool("update_settings", { model: { providerId: "", modelId: "" } }),
-        );
-        return;
-      }
-      const split = key.indexOf("/");
-      const providerId = key.slice(0, split);
-      const modelId = key.slice(split + 1);
-      const model = models.find(
-        (item) => item.providerId === providerId && item.modelId === modelId,
-      );
-      const level = model?.reasoningDefault ?? "";
-      void withBusy(() =>
-        callTool("update_settings", {
-          model: {
-            providerId,
-            modelId,
-            ...(level ? { options: { reasoningLevel: level } } : {}),
-          },
-        }),
-      );
-    },
-    [withBusy, models],
-  );
-
-  /** 改思考等级；空表示用模型默认档。 */
-  const changeReasoning = useCallback(
-    (level: string) => {
-      if (!settings) return;
-      const trimmed = level.trim();
-      void withBusy(() =>
-        callTool("update_settings", {
-          model: {
-            ...settings.model,
-            ...(trimmed ? { options: { reasoningLevel: trimmed } } : {}),
-          },
-        }),
-      );
-    },
-    [withBusy, settings],
-  );
-
-  /** 调整任务执行顺序；同一会话的任务按这个顺序排队执行。 */
-  const moveJob = useCallback(
-    (jobId: string, direction: "up" | "down") => {
-      void withBusy(() => callTool("move_job", { jobId, direction }));
-    },
-    [withBusy],
-  );
-
   const sessionOptions = useMemo(
     () =>
       sessions.map((session) => ({
@@ -378,137 +332,130 @@ function App_(): JSX.Element {
     <div className="panel">
       <header className="panel-head">
         <h1>任务调度</h1>
-        <button className="ghost" onClick={() => void refresh(true)} disabled={busy}>
+        <button className="ghost" onClick={() => void refresh()} disabled={busy}>
           刷新
         </button>
       </header>
 
-      <div className={`daemon-hint ${daemonStatus ? "" : "down"}`}>
-        {daemonStatus
-          ? `调度器运行中 · ${daemonStatus.launchSource}${
-              daemonStatus.busyJobIds.length > 0 ? ` · 执行中 ${daemonStatus.busyJobIds.length}` : ""
-            }`
-          : "调度器不可达：到点不会执行。重开面板或会话会把它拉起来。"}
+      <div className="daemon-hint">
+        任务由桌面端自己的调度器到点投递：执行发生在目标会话里，模型与鉴权都走桌面端
+        当前的会话设置（订阅账号模型可用）。桌面端需要开着；关机或退出期间错过的时间点不会补跑。
       </div>
 
       {error ? <div className="banner error">{error}</div> : null}
 
       <section className="block">
         <h2>任务清单</h2>
-        <p className="hint">同一会话的任务按下面顺序排队执行，不并发；用箭头调整顺序。</p>
         {jobs.length === 0 ? (
           <p className="empty">还没有登记任务。</p>
         ) : (
           <ul className="jobs">
-            {jobs.map((job, index) => (
-              <li key={job.id} className="job">
-                <div className="job-row">
-                  <span className={`badge ${STATUS_TONE[job.lastStatus ?? ""] ?? "idle"}`}>
-                    {job.lastStatus ?? "未运行"}
-                  </span>
-                  <span className="job-title">{job.title}</span>
-                </div>
-                <div className="job-meta">
-                  <span>{describeTarget(job, sessions)}</span>
-                  <span>{describeSchedule(job)}</span>
-                  <span>下次 {formatTime(job.nextRunAt)}</span>
-                  {!job.enabled ? <span>已停用</span> : null}
-                </div>
-                {job.lastError ? <div className="job-error">{job.lastError}</div> : null}
-                {editingJobId === job.id ? (
-                  <div className="edit-box">
-                    <label>
-                      <span>重复</span>
-                      <select
-                        value={editKind}
-                        onChange={(e) => setEditKind(e.target.value as "once" | "daily" | "weekly")}
-                      >
-                        <option value="once">仅一次</option>
-                        <option value="daily">每天</option>
-                        <option value="weekly">每周</option>
-                      </select>
-                    </label>
-                    {editKind === "once" ? (
+            {jobs.map((job) => {
+              const status = jobStatus(job);
+              return (
+                <li key={job.automationId} className="job">
+                  <div className="job-row">
+                    <span className={`badge ${status.tone}`}>{status.text}</span>
+                    <span className="job-title">{job.title}</span>
+                  </div>
+                  <div className="job-meta">
+                    <span>{describeTarget(job, sessions)}</span>
+                    <span>{describeSchedule(job)}</span>
+                    <span>{describeModel(job)}</span>
+                    <span>下次 {formatTime(job.nextRunAt)}</span>
+                    <span>已执行 {job.runCount} 次</span>
+                  </div>
+                  {job.lastError ? <div className="job-error">{job.lastError}</div> : null}
+                  {editingJobId === job.automationId ? (
+                    <div className="edit-box">
                       <label>
-                        <span>执行时刻</span>
-                        <input
-                          type="datetime-local"
-                          value={editRunAt}
-                          onChange={(e) => setEditRunAt(e.target.value)}
-                        />
+                        <span>重复</span>
+                        <select
+                          value={editKind}
+                          onChange={(e) => setEditKind(e.target.value as "once" | "daily" | "weekly")}
+                        >
+                          <option value="once">仅一次</option>
+                          <option value="daily">每天</option>
+                          <option value="weekly">每周</option>
+                        </select>
                       </label>
-                    ) : (
-                      <label>
-                        <span>执行时刻</span>
-                        <input
-                          type="time"
-                          value={editTime}
-                          onChange={(e) => setEditTime(e.target.value)}
-                        />
-                      </label>
-                    )}
-                    {editKind === "weekly" ? (
-                      <WeekdayPicker value={editWeekdays} onChange={setEditWeekdays} />
-                    ) : null}
+                      {editKind === "once" ? (
+                        <label>
+                          <span>执行时刻</span>
+                          <input
+                            type="datetime-local"
+                            value={editRunAt}
+                            onChange={(e) => setEditRunAt(e.target.value)}
+                          />
+                        </label>
+                      ) : (
+                        <label>
+                          <span>执行时刻</span>
+                          <input
+                            type="time"
+                            value={editTime}
+                            onChange={(e) => setEditTime(e.target.value)}
+                          />
+                        </label>
+                      )}
+                      {editKind === "weekly" ? (
+                        <WeekdayPicker value={editWeekdays} onChange={setEditWeekdays} />
+                      ) : null}
+                      <div className="job-actions">
+                        <button className="primary" disabled={busy} onClick={() => void saveEdit()}>
+                          保存
+                        </button>
+                        <button className="ghost" disabled={busy} onClick={() => setEditingJobId(null)}>
+                          取消
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
                     <div className="job-actions">
-                      <button className="primary" disabled={busy} onClick={() => void saveEdit()}>
-                        保存
+                      <button
+                        className="ghost"
+                        disabled={busy}
+                        onClick={() =>
+                          void withBusy(() =>
+                            callTool("run_now", { jobId: job.automationId }),
+                          )
+                        }
+                      >
+                        立即执行
                       </button>
-                      <button className="ghost" disabled={busy} onClick={() => setEditingJobId(null)}>
-                        取消
+                      <button className="ghost" disabled={busy} onClick={() => startEdit(job)}>
+                        改期
+                      </button>
+                      <button
+                        className="ghost"
+                        disabled={busy}
+                        onClick={() =>
+                          void withBusy(() =>
+                            callTool("update_job", {
+                              jobId: job.automationId,
+                              enabled: !job.enabled,
+                            }),
+                          )
+                        }
+                      >
+                        {job.enabled ? "停用" : "启用"}
+                      </button>
+                      <button
+                        className="ghost danger"
+                        disabled={busy}
+                        onClick={() =>
+                          void withBusy(() =>
+                            callTool("remove_job", { jobId: job.automationId }),
+                          )
+                        }
+                      >
+                        删除
                       </button>
                     </div>
-                  </div>
-                ) : (
-                  <div className="job-actions">
-                    <button
-                      className="ghost"
-                      disabled={busy}
-                      onClick={() => void withBusy(() => callTool("run_now", { jobId: job.id }))}
-                    >
-                      立即执行
-                    </button>
-                    <button className="ghost" disabled={busy} onClick={() => startEdit(job)}>
-                      改期
-                    </button>
-                    <button
-                      className="ghost"
-                      disabled={busy || index === 0}
-                      title="上移"
-                      onClick={() => moveJob(job.id, "up")}
-                    >
-                      ↑
-                    </button>
-                    <button
-                      className="ghost"
-                      disabled={busy || index === jobs.length - 1}
-                      title="下移"
-                      onClick={() => moveJob(job.id, "down")}
-                    >
-                      ↓
-                    </button>
-                    <button
-                      className="ghost"
-                      disabled={busy}
-                      onClick={() =>
-                        void withBusy(() =>
-                          callTool("update_job", { jobId: job.id, enabled: !job.enabled }),
-                        )
-                      }
-                    >
-                      {job.enabled ? "停用" : "启用"}
-                    </button>
-                    <button
-                      className="ghost danger"
-                      disabled={busy}
-                      onClick={() => void withBusy(() => callTool("remove_job", { jobId: job.id }))}
-                    >
-                      删除
-                    </button>
-                  </div>
-                )}
-              </li>
-            ))}
+                  )}
+                </li>
+              );
+            })}
           </ul>
         )}
       </section>
@@ -592,7 +539,62 @@ function App_(): JSX.Element {
           </label>
         )}
 
-        {scheduleKind === "weekly" ? <WeekdayPicker value={weekdays} onChange={setWeekdays} /> : null}
+        {scheduleKind === "weekly" ? (
+          <WeekdayPicker value={weekdays} onChange={setWeekdays} />
+        ) : null}
+
+        <label>
+          <span>执行模型</span>
+          <select
+            value={modelMode}
+            onChange={(e) => setModelMode(e.target.value as "minimax" | "follow" | "custom")}
+          >
+            <option value="minimax">MiniMax M3.1 Flash（默认，全天可用）</option>
+            <option value="follow">跟随会话当前模型</option>
+            <option value="custom">指定模型</option>
+          </select>
+        </label>
+
+        {modelMode === "custom" ? (
+          <>
+            <div className="settings-grid">
+              <label>
+                <span>供应商</span>
+                <input
+                  value={modelProvider}
+                  onChange={(e) => setModelProvider(e.target.value)}
+                  placeholder="account:bigmodel-start-plan"
+                />
+              </label>
+              <label>
+                <span>模型</span>
+                <input
+                  value={modelId}
+                  onChange={(e) => setModelId(e.target.value)}
+                  placeholder="GLM-5.3-Flash"
+                />
+              </label>
+              <label>
+                <span>思考档位</span>
+                <input
+                  value={reasoningLevel}
+                  onChange={(e) => setReasoningLevel(e.target.value)}
+                  placeholder="max"
+                />
+              </label>
+            </div>
+            <p className="hint">
+              订阅账号套餐（如 account:bigmodel-start-plan）只在套餐覆盖的时段可用，
+              白天指定会失败；思考档位必填，桌面端派发前会校验。
+            </p>
+          </>
+        ) : (
+          <p className="hint">
+            {modelMode === "minimax"
+              ? "默认用 MiniMax M3.1 Flash：全天可用的常规模型。"
+              : "跟随会话当前选的模型；若会话里选的是夜间套餐，白天执行会失败。"}
+          </p>
+        )}
 
         <button
           className="primary"
@@ -603,147 +605,6 @@ function App_(): JSX.Element {
         </button>
       </section>
 
-      {settings ? (
-        <section className="block">
-          <h2>全局设置</h2>
-          <div className="settings-grid">
-            <label>
-              <span>默认执行时刻</span>
-              <input
-                type="time"
-                value={formatClock(settings.defaultTimeOfDay)}
-                onChange={(e) => {
-                  const ms = parseClock(e.target.value);
-                  if (ms === null) return;
-                  void withBusy(() => callTool("update_settings", { defaultTimeOfDay: ms }));
-                }}
-              />
-            </label>
-            <label>
-              <span>并发上限</span>
-              <input
-                type="number"
-                min={1}
-                value={settings.maxConcurrent}
-                onChange={(e) => changeSetting("maxConcurrent", e.target.value, 1)}
-              />
-            </label>
-            <label>
-              <span>每分钟启动数</span>
-              <input
-                type="number"
-                min={1}
-                value={settings.maxStartsPerMinute}
-                onChange={(e) => changeSetting("maxStartsPerMinute", e.target.value, 1)}
-              />
-            </label>
-            <label>
-              <span>最小间隔(ms)</span>
-              <input
-                type="number"
-                min={0}
-                value={settings.minGapMs}
-                onChange={(e) => changeSetting("minGapMs", e.target.value, 0)}
-              />
-            </label>
-            <label>
-              <span>单次超时(ms)</span>
-              <input
-                type="number"
-                min={60000}
-                step={60000}
-                value={settings.taskTimeoutMs}
-                onChange={(e) => changeSetting("taskTimeoutMs", e.target.value, 60_000)}
-              />
-            </label>
-            <label>
-              <span>最大重试</span>
-              <input
-                type="number"
-                min={0}
-                value={settings.maxRetries}
-                onChange={(e) => changeSetting("maxRetries", e.target.value, 0)}
-              />
-            </label>
-          </div>
-          <p className="hint">
-            {settings.model.modelId
-              ? "执行模型固定为下方所选；留「跟随默认」则用会话自己的模型。"
-              : "执行模型跟随默认；要固定某个模型请在上面挑选。"}
-          </p>
-          <label>
-            <span>执行模型</span>
-            <select
-              value={
-                settings.model.modelId
-                  ? `${settings.model.providerId}/${settings.model.modelId}`
-                  : "default"
-              }
-              onChange={(e) => changeModel(e.target.value)}
-            >
-              <option value="default">跟随默认</option>
-              {models.map((model) => (
-                <option
-                  key={`${model.providerId}/${model.modelId}`}
-                  value={`${model.providerId}/${model.modelId}`}
-                  disabled={Boolean(model.disabledReason)}
-                >
-                  {(model.providerLabel ?? model.providerId)} · {model.label}
-                  {model.disabledReason ? `（不可用：${model.disabledReason}）` : ""}
-                </option>
-              ))}
-              {settings.model.modelId &&
-              !models.some(
-                (model) =>
-                  model.providerId === settings.model.providerId &&
-                  model.modelId === settings.model.modelId,
-              ) ? (
-                <option value={`${settings.model.providerId}/${settings.model.modelId}`}>
-                  {settings.model.providerId} · {settings.model.modelId}
-                </option>
-              ) : null}
-            </select>
-          </label>
-          <p className="hint">
-            列表来自 daemon 自己拉起的 CLI 进程的模型目录。账号型供应商（Start
-            Plan 等订阅账号模型）的可用事实与鉴权都由桌面端宿主注入，无人值守执行拿不到，所以不在列表里；同名模型请选
-            API 型供应商（如 bigmodel-standard-api，按 API 计费）。
-          </p>
-          {settings.model.modelId ? (
-            <label>
-              <span>思考等级</span>
-              {(() => {
-                const selected = models.find(
-                  (model) =>
-                    model.providerId === settings.model.providerId &&
-                    model.modelId === settings.model.modelId,
-                );
-                const current = settings.model.options?.reasoningLevel ?? "";
-                if (selected && selected.reasoningLevels.length > 0) {
-                  return (
-                    <select value={current} onChange={(e) => changeReasoning(e.target.value)}>
-                      <option value="">模型默认</option>
-                      {selected.reasoningLevels.map((level) => (
-                        <option key={level} value={level}>
-                          {level}
-                        </option>
-                      ))}
-                    </select>
-                  );
-                }
-                return (
-                  <input
-                    value={current}
-                    placeholder="模型默认"
-                    onChange={(e) => changeReasoning(e.target.value)}
-                  />
-                );
-              })()}
-            </label>
-          ) : null}
-        </section>
-      ) : null}
-
       <section className="block">
         <h2>运行日志</h2>
         {runs.length === 0 ? (
@@ -751,12 +612,14 @@ function App_(): JSX.Element {
         ) : (
           <ul className="runs">
             {runs.slice(0, 30).map((run) => (
-              <li key={run.id}>
-                <span className={`badge ${STATUS_TONE[run.status] ?? "idle"}`}>{run.status}</span>
-                <span className="run-meta">
-                  第 {run.attempt} 次 · {formatTime(run.startedAt)}
+              <li key={run.runId}>
+                <span className={`badge ${RUN_TONE[run.outcome ?? ""] ?? "idle"}`}>
+                  {run.outcome ?? "进行中"}
                 </span>
-                {run.errorMessage ? <span className="job-error">{run.errorMessage}</span> : null}
+                <span className="run-meta">
+                  {run.trigger === "manual" ? "立即执行" : "定时"} · {formatTime(run.scheduledAt ?? run.createdAt)}
+                </span>
+                {run.error ? <span className="job-error">{run.error}</span> : null}
               </li>
             ))}
           </ul>

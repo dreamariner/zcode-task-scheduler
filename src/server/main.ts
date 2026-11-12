@@ -4,8 +4,14 @@ import { McpServer, ResourceTemplate } from "@modelcontextprotocol/sdk/server/mc
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { pluginRoot } from "../shared/paths.js";
-import { DaemonClient } from "./daemon-client.js";
 import { requireSessionId } from "./session-context.js";
+import { migrateLegacyJobs } from "../automation/migrate.js";
+import {
+  AUTOMATION_LIMIT,
+  AutomationStore,
+  type ScheduleInput,
+  type ScheduleKind,
+} from "../automation/store.js";
 
 const SERVER_NAME = "zcode-task-scheduler";
 const SERVER_VERSION = "0.1.0";
@@ -42,53 +48,123 @@ function textResult(text: string, structuredContent?: Record<string, unknown>): 
   };
 }
 
+const scheduleShape = {
+  scheduleKind: z.enum(["once", "daily", "weekly"]).optional().describe("once 一次性，daily 每天，weekly 每周"),
+  runAt: z.number().optional().describe("scheduleKind 为 once 时的绝对时刻（毫秒时间戳）"),
+  timeOfDay: z.number().optional().describe("每天几点（当天零点起的毫秒偏移），如 00:30 传 1800000"),
+  weekdays: z.array(z.number()).optional().describe("scheduleKind 为 weekly 时的星期（0 是周日）"),
+};
+
+/**
+ * 执行模型。
+ *
+ * 默认用 MiniMax M3.1 Flash：它是全天可用的常规模型。订阅账号套餐（如 Start Plan）
+ * 只在套餐覆盖的时段（夜间）可用，白天指定它会被桌面端判为不可用而失败，
+ * 所以默认不跟随会话当前模型（会话里选的往往正是夜间套餐）。
+ * 需要夜间套餐时显式指定 model；需要完全跟随会话时用 followSessionModel。
+ */
+const DEFAULT_MODEL = {
+  providerId: "minimax",
+  modelId: "MiniMax-M3.1-Flash",
+  reasoningLevel: "max",
+} as const;
+
+const modelShape = {
+  model: z
+    .object({
+      providerId: z.string().min(1),
+      modelId: z.string().min(1),
+      reasoningLevel: z.string().min(1),
+    })
+    .optional()
+    .describe(
+      "执行模型；不传则用 MiniMax M3.1 Flash（白天可用的常规模型）。夜间套餐（如 account:bigmodel-start-plan）要显式指定，并给思考档位",
+    ),
+  followSessionModel: z
+    .boolean()
+    .optional()
+    .describe("true 表示跟随桌面端当前首选模型（会话当前选择）；套餐可能只在夜间可用"),
+};
+
+function scheduleOf(input: {
+  scheduleKind?: ScheduleKind;
+  runAt?: number;
+  timeOfDay?: number;
+  weekdays?: number[];
+}): ScheduleInput {
+  const kind = input.scheduleKind ?? "daily";
+  if (kind === "once") {
+    if (typeof input.runAt !== "number" || !Number.isFinite(input.runAt) || input.runAt <= 0) {
+      throw new Error("一次性任务需要合法的 runAt（毫秒时间戳）");
+    }
+    return { kind, runAt: input.runAt };
+  }
+  const timeOfDay = input.timeOfDay ?? 0;
+  if (!Number.isFinite(timeOfDay) || timeOfDay < 0 || timeOfDay >= 24 * 60 * 60 * 1000) {
+    throw new Error("timeOfDay 需要是当天零点起的毫秒偏移");
+  }
+  if (kind === "weekly") {
+    const weekdays = (input.weekdays ?? []).filter(
+      (day) => Number.isInteger(day) && day >= 0 && day <= 6,
+    );
+    if (weekdays.length === 0) throw new Error("每周任务至少选择一天");
+    return { kind, timeOfDay, weekdays };
+  }
+  return { kind, timeOfDay };
+}
+
+/**
+ * 决定任务用哪个模型：
+ * - followSessionModel 为 true → 跟随桌面端当前首选（model_selection 写 "null"）；
+ * - 给了 model → 用它（桌面端派发前会校验模型与思考档位）；
+ * - 都没给 → 默认 MiniMax M3.1 Flash（白天可用的常规模型）。
+ */
+function resolveModel(input: {
+  model?: { providerId: string; modelId: string; reasoningLevel: string };
+  followSessionModel?: boolean;
+}): { providerId: string; modelId: string; reasoningLevel: string } | null {
+  if (input.followSessionModel === true) return null;
+  if (input.model) {
+    return {
+      providerId: input.model.providerId,
+      modelId: input.model.modelId,
+      reasoningLevel: input.model.reasoningLevel,
+    };
+  }
+  return { ...DEFAULT_MODEL };
+}
+
+function statusText(row: {
+  enabled: boolean;
+  lifecycleStatus: string;
+  running: boolean;
+  lastRunAt: number | null;
+}): string {  if (!row.enabled) return "已停用";
+  if (row.lifecycleStatus === "completed") return "已完成";
+  if (row.lifecycleStatus === "failed") return "已失败";
+  if (row.running) return "执行中";
+  return row.lastRunAt ? "已排队" : "待执行";
+}
+
 export async function main(): Promise<void> {
   const server = new McpServer(
     { name: SERVER_NAME, version: SERVER_VERSION },
     { capabilities: { tools: {}, resources: {} } },
   );
 
-  let daemon: DaemonClient | null = null;
-  // 连接过程要合并：插件加载时会主动拉一次调度器，紧接着的第一个工具调用也会拉一次，
-  // 不合并就会起两个 daemon，多出来的那个抢不到 pidfile 锁，白跑一轮。
-  let daemonPending: Promise<DaemonClient> | null = null;
+  const store = new AutomationStore({
+    log: (message) => process.stderr.write(`[${SERVER_NAME}] ${message}\n`),
+  });
 
-  const getDaemon = async (): Promise<DaemonClient> => {
-    // 调度器是独立进程：它崩了或空闲自退之后，这边缓存的连接就是死的。
-    // 不丢掉重连，面板会一直报「daemon 连接未建立」，直到整个会话重建。
-    if (daemon && !daemon.connected) {
-      daemon = null;
-      daemonPending = null;
-    }
-    if (daemon) return daemon;
-    if (daemonPending) return daemonPending;
-    daemonPending = DaemonClient.connect({
-      env: process.env,
-      log: (message) => process.stderr.write(`[${SERVER_NAME}] ${message}\n`),
-    })
-      .then((client) => {
-        daemon = client;
-        return client;
-      })
-      .catch((error: unknown) => {
-        daemonPending = null;
-        throw error;
-      });
-    return daemonPending;
-  };
-
-  const call = async <T = unknown>(
-    method: string,
-    params: Record<string, unknown> = {},
-  ): Promise<T> => {
-    try {
-      const client = await getDaemon();
-      return await client.call<T>(method, params);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(`调度器不可用：${message}`);
-    }
-  };
+  // 一次性迁移：旧版插件自己的任务库 → 桌面端 automations 表。
+  const migrated = migrateLegacyJobs(store, {
+    log: (message) => process.stderr.write(`[${SERVER_NAME}] ${message}\n`),
+  });
+  if (migrated.migrated > 0) {
+    process.stderr.write(
+      `[${SERVER_NAME}] 已迁移 ${migrated.migrated} 条旧任务到桌面端调度器\n`,
+    );
+  }
 
   // ── 工具 ──
 
@@ -101,17 +177,19 @@ export async function main(): Promise<void> {
       _meta: toolUi(),
     },
     async () => {
-      const result = await call<{ sessions: unknown[] }>("list_sessions", workspaceParams());
-      const sessions = result.sessions ?? [];
-      const lines = sessions.map((entry) => {
-        const item = entry as { sessionId: string; title: string; status: string; updatedAt: number | null };
-        const title = item.title?.trim() || "(无标题)";
-        return `${item.sessionId}\t${title}\t${item.status}`;
-      });
+      const workspace = workspaceParams();
+      const tasks = store.listWorkspaceTasks(workspace.workspacePath);
+      const sessions = tasks.map((task) => ({
+        sessionId: task.taskId,
+        title: task.title,
+        status: "",
+        updatedAt: task.updatedAt,
+      }));
+      const lines = sessions.map(
+        (item) => `${item.sessionId}\t${item.title || "(无标题)"}`,
+      );
       return textResult(
-        lines.length > 0
-          ? ["会话列表（sessionId / 标题 / 状态）：", ...lines].join("\n")
-          : "当前工作区没有会话。",
+        lines.length > 0 ? ["会话列表（sessionId / 标题）：", ...lines].join("\n") : "当前工作区没有会话。",
         { sessions },
       );
     },
@@ -126,12 +204,10 @@ export async function main(): Promise<void> {
       _meta: toolUi(),
     },
     async () => {
-      const result = await call<{ jobs: unknown[] }>("list_jobs");
-      const jobs = result.jobs ?? [];
-      const lines = jobs.map((entry) => {
-        const job = entry as { id: string; title: string; nextRunAt: number | null; lastStatus: string | null };
+      const jobs = store.list();
+      const lines = jobs.map((job) => {
         const due = job.nextRunAt ? new Date(job.nextRunAt).toLocaleString("zh-CN") : "无下次计划";
-        return `${job.id}\t${job.title}\t${job.lastStatus ?? "未运行"}\t下次 ${due}`;
+        return `${job.automationId}\t${job.title}\t${statusText(job)}\t下次 ${due}`;
       });
       return textResult(
         lines.length > 0 ? ["任务列表：", ...lines].join("\n") : "还没有登记任何任务。",
@@ -150,25 +226,30 @@ export async function main(): Promise<void> {
         targetKind: z.enum(["session", "new-session"]).optional().describe("session 指派到已有会话，new-session 到点时新建会话"),
         sessionId: z.string().optional().describe("targetKind 为 session 时必填"),
         targetTitle: z.string().optional().describe("targetKind 为 new-session 时的新会话标题"),
-        scheduleKind: z.enum(["once", "daily", "weekly"]).optional().describe("once 一次性，daily 每天，weekly 每周"),
-        runAt: z.number().optional().describe("scheduleKind 为 once 时的绝对时刻（毫秒时间戳）"),
-        timeOfDay: z.number().optional().describe("每天几点（当天零点起的毫秒偏移），如 00:30 传 1800000"),
-        weekdays: z.array(z.number()).optional().describe("scheduleKind 为 weekly 时的星期（0 是周日）"),
-        maxAttempts: z.number().int().positive().optional().describe("含首次执行在内的最大尝试次数"),
+        ...scheduleShape,
+        ...modelShape,
       },
       _meta: toolUi(),
     },
     async (input) => {
-      const result = await call<{ job: { id: string; title: string; nextRunAt: number | null } }>(
-        "add_job",
-        { ...workspaceParams(), ...input },
-      );
-      const due = result.job.nextRunAt
-        ? new Date(result.job.nextRunAt).toLocaleString("zh-CN")
-        : "未排期";
-      return textResult(`已登记任务 ${result.job.id}：${result.job.title}，下次执行 ${due}`, {
-        job: result.job,
+      const count = store.count();
+      if (count >= AUTOMATION_LIMIT) {
+        throw new Error(`定时任务已达上限 ${AUTOMATION_LIMIT} 条（官方约定），请先删掉不用的`);
+      }
+      const workspace = workspaceParams();
+      const job = store.create({
+        title: input.title?.trim() || "未命名任务",
+        prompt: input.prompt,
+        targetSessionId: input.targetKind === "new-session" ? null : (input.sessionId ?? null),
+        workspaceKey: workspace.workspacePath,
+        workspacePath: workspace.workspacePath,
+        ...(workspace.workspaceIdentity ? { workspaceIdentity: workspace.workspaceIdentity } : {}),
+        schedule: scheduleOf(input),
+        enabled: true,
+        model: resolveModel(input),
       });
+      const due = job.nextRunAt ? new Date(job.nextRunAt).toLocaleString("zh-CN") : "未排期";
+      return textResult(`已登记任务 ${job.automationId}：${job.title}，下次执行 ${due}`, { job });
     },
   );
 
@@ -180,33 +261,34 @@ export async function main(): Promise<void> {
       inputSchema: {
         title: z.string().optional().describe("任务标题"),
         prompt: z.string().min(1).describe("要执行的任务内容，直接描述要完成的最终工作"),
-        scheduleKind: z.enum(["once", "daily", "weekly"]).optional().describe("once 一次性，daily 每天，weekly 每周"),
-        runAt: z.number().optional().describe("scheduleKind 为 once 时的绝对时刻（毫秒时间戳）"),
-        timeOfDay: z.number().optional().describe("每天几点（当天零点起的毫秒偏移），如 00:30 传 1800000"),
-        weekdays: z.array(z.number()).optional().describe("scheduleKind 为 weekly 时的星期（0 是周日）"),
-        maxAttempts: z.number().int().positive().optional().describe("含首次执行在内的最大尝试次数"),
+        ...scheduleShape,
+        ...modelShape,
       },
       _meta: toolUi(),
     },
     async (input, extra) => {
       // 会话 id 由宿主随工具调用注入（_meta.session_id），模型与指令都拿不到自己的会话 id。
       const sessionId = requireSessionId(extra?._meta);
-      const result = await call<{ job: { id: string; title: string; nextRunAt: number | null } }>(
-        "add_job",
-        {
-          ...workspaceParams(),
-          ...input,
-          targetKind: "session",
-          sessionId,
-          targetLabel: "当前会话",
-        },
-      );
-      const due = result.job.nextRunAt
-        ? new Date(result.job.nextRunAt).toLocaleString("zh-CN")
-        : "未排期";
+      const count = store.count();
+      if (count >= AUTOMATION_LIMIT) {
+        throw new Error(`定时任务已达上限 ${AUTOMATION_LIMIT} 条（官方约定），请先删掉不用的`);
+      }
+      const workspace = workspaceParams();
+      const job = store.create({
+        title: input.title?.trim() || "未命名任务",
+        prompt: input.prompt,
+        targetSessionId: sessionId,
+        workspaceKey: workspace.workspacePath,
+        workspacePath: workspace.workspacePath,
+        ...(workspace.workspaceIdentity ? { workspaceIdentity: workspace.workspaceIdentity } : {}),
+        schedule: scheduleOf(input),
+        enabled: true,
+        model: resolveModel(input),
+      });
+      const due = job.nextRunAt ? new Date(job.nextRunAt).toLocaleString("zh-CN") : "未排期";
       return textResult(
-        `已把任务 ${result.job.id}（${result.job.title}）派到当前会话，下次执行 ${due}`,
-        { job: result.job },
+        `已把任务 ${job.automationId}（${job.title}）派到当前会话，下次执行 ${due}`,
+        { job },
       );
     },
   );
@@ -214,22 +296,30 @@ export async function main(): Promise<void> {
   server.registerTool(
     "update_job",
     {
-      description: "修改任务：改期、改内容、停用或删除。",
+      description: "修改任务：改期、改内容、停用或启用。",
       inputSchema: {
         jobId: z.string().min(1),
         title: z.string().optional(),
         prompt: z.string().optional(),
         enabled: z.boolean().optional(),
-        scheduleKind: z.enum(["once", "daily", "weekly"]).optional(),
-        runAt: z.number().optional(),
-        timeOfDay: z.number().optional(),
-        weekdays: z.array(z.number()).optional(),
+        ...scheduleShape,
       },
       _meta: toolUi(),
     },
     async (input) => {
-      const result = await call<{ job: unknown }>("update_job", input);
-      return textResult(`任务 ${input.jobId} 已更新`, { job: result.job });
+      const hasSchedule =
+        input.scheduleKind !== undefined ||
+        input.runAt !== undefined ||
+        input.timeOfDay !== undefined ||
+        input.weekdays !== undefined;
+      const job = store.update(input.jobId, {
+        ...(input.title !== undefined ? { title: input.title } : {}),
+        ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
+        ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+        ...(hasSchedule ? { schedule: scheduleOf(input) } : {}),
+      });
+      if (!job) throw new Error(`任务 ${input.jobId} 不存在`);
+      return textResult(`任务 ${input.jobId} 已更新`, { job });
     },
   );
 
@@ -242,8 +332,8 @@ export async function main(): Promise<void> {
       _meta: toolUi(),
     },
     async (input) => {
-      const result = await call<{ removed: boolean }>("remove_job", input);
-      return textResult(result.removed ? `任务 ${input.jobId} 已删除` : `任务 ${input.jobId} 不存在`);
+      const removed = store.remove(input.jobId);
+      return textResult(removed ? `任务 ${input.jobId} 已删除` : `任务 ${input.jobId} 不存在`);
     },
   );
 
@@ -255,13 +345,21 @@ export async function main(): Promise<void> {
       _meta: toolUi(),
     },
     async (input) => {
-      const result = await call<{ started: string[] }>("run_now", input);
-      return textResult(
-        result.started.length > 0
-          ? `已开始执行：${result.started.join("、")}`
-          : "没有可执行的任务。",
-        { started: result.started },
-      );
+      const targets = input.jobId
+        ? [input.jobId]
+        : store.list().filter((job) => job.enabled).map((job) => job.automationId);
+      const started: string[] = [];
+      const busy: string[] = [];
+      for (const id of targets) {
+        const result = store.enqueueManualRun(id);
+        if (result) started.push(id);
+        else busy.push(id);
+      }
+      const parts: string[] = [];
+      if (started.length > 0) parts.push(`已开始执行：${started.join("、")}`);
+      if (busy.length > 0) parts.push(`已在执行中（未重复投递）：${busy.join("、")}`);
+      if (parts.length === 0) parts.push("没有可执行的任务。");
+      return textResult(parts.join("\n"), { started, busy });
     },
   );
 
@@ -277,141 +375,23 @@ export async function main(): Promise<void> {
       _meta: toolUi(),
     },
     async (input) => {
-      const result = await call<{ summary: unknown[]; runs: unknown[] }>("job_status", input);
-      const summary = result.summary ?? [];
-      const lines = summary.map((entry) => {
-        const item = entry as {
-          jobId: string;
-          title: string;
-          lastStatus: string | null;
-          nextRunAt: number | null;
-          consecutiveFailures: number;
-        };
+      const summary = store.list().map((job) => ({
+        jobId: job.automationId,
+        title: job.title,
+        lastStatus: statusText(job),
+        nextRunAt: job.nextRunAt,
+        consecutiveFailures: 0,
+        enabled: job.enabled,
+      }));
+      const runs = store.listRuns(input.jobId, input.limit ?? 30);
+      const lines = summary.map((item) => {
         const due = item.nextRunAt ? new Date(item.nextRunAt).toLocaleString("zh-CN") : "无";
-        return `${item.title}\t${item.lastStatus ?? "未运行"}\t连续失败 ${item.consecutiveFailures}\t下次 ${due}`;
+        return `${item.title}\t${item.lastStatus}\t下次 ${due}`;
       });
       return textResult(
         lines.length > 0 ? ["任务状态：", ...lines].join("\n") : "还没有任务。",
-        { summary, runs: result.runs },
+        { summary, runs },
       );
-    },
-  );
-
-  server.registerTool(
-    "get_settings",
-    {
-      description: "读取调度器的全局设置（执行时刻、并发上限、速率、超时、重试）。",
-      inputSchema: {},
-      annotations: { readOnlyHint: true },
-      _meta: toolUi(),
-    },
-    async () => {
-      const result = await call<{ settings: unknown }>("get_settings");
-      return textResult(JSON.stringify(result.settings, null, 2), {
-        settings: result.settings,
-      });
-    },
-  );
-
-  server.registerTool(
-    "update_settings",
-    {
-      description: "修改调度器的全局设置。只有面板可以调：改并发与速率会改变定时执行的闸门，模型不应碰。",
-      inputSchema: {
-        defaultTimeOfDay: z.number().optional().describe("每天几点（当天零点起的毫秒偏移）"),
-        maxConcurrent: z.number().int().positive().optional().describe("全局并发上限"),
-        maxStartsPerMinute: z.number().int().positive().optional().describe("每分钟最多启动多少个任务"),
-        minGapMs: z.number().int().nonnegative().optional().describe("相邻两次启动的最小间隔（毫秒）"),
-        taskTimeoutMs: z.number().int().positive().optional().describe("单次执行超时（毫秒）"),
-        maxRetries: z.number().int().nonnegative().optional().describe("失败后的最大重试次数"),
-        retryBackoffMs: z.number().int().nonnegative().optional().describe("首次重试前的等待时间（毫秒）"),
-        model: z
-          .object({
-            providerId: z.string(),
-            modelId: z.string(),
-            options: z.object({ reasoningLevel: z.string() }).optional(),
-          })
-          .optional()
-          .describe(
-            "执行模型；providerId 与 modelId 都留空表示跟随会话默认，候选列表用 list_models 取",
-          ),
-      },
-      // 只对面板开放：模型侧被注入时不能靠改全局设置放大无人值守执行的破坏面。
-      _meta: toolUi(["app"]),
-    },
-    async (input) => {
-      const result = await call<{ settings: unknown }>("update_settings", input);
-      return textResult("设置已更新", { settings: result.settings });
-    },
-  );
-
-  server.registerTool(
-    "list_models",
-    {
-      description: "列出当前可用的模型（取自会话运行时的模型目录），用来给执行模型挑一个。",
-      inputSchema: {
-        refresh: z.boolean().optional().describe("true 跳过 5 分钟缓存，重新向会话运行时取目录"),
-      },
-      annotations: { readOnlyHint: true },
-      _meta: toolUi(),
-    },
-    async (input) => {
-      const result = await call<{ models: unknown[] }>("list_models", {
-        ...workspaceParams(),
-        ...(input.refresh === true ? { refresh: true } : {}),
-      });
-      const models = result.models ?? [];
-      const lines = models.map((entry) => {
-        const item = entry as {
-          providerId: string;
-          modelId: string;
-          label: string;
-          providerLabel?: string;
-          reasoningLevels: string[];
-          disabledReason?: string;
-        };
-        const provider = item.providerLabel ?? item.providerId;
-        const levels = item.reasoningLevels?.length > 0 ? `\t思考等级 ${item.reasoningLevels.join("/")}` : "";
-        const disabled = item.disabledReason ? "\t不可用：" + item.disabledReason : "";
-        return `${item.providerId}/${item.modelId}\t${provider} · ${item.label}${levels}${disabled}`;
-      });
-      return textResult(
-        lines.length > 0
-          ? ["可用模型（providerId/modelId / 名称）：", ...lines].join("\n")
-          : "没有取到模型目录；工作区里先有会话再试。",
-        { models },
-      );
-    },
-  );
-
-  server.registerTool(
-    "move_job",
-    {
-      description: "调整任务在面板里的执行顺序。同一会话的多个任务按这个顺序排队执行，不并发。",
-      inputSchema: {
-        jobId: z.string().min(1),
-        direction: z.enum(["up", "down"]).describe("up 上移一位，down 下移一位"),
-      },
-      // 调顺序是面板偏好，模型侧不需要。
-      _meta: toolUi(["app"]),
-    },
-    async (input) => {
-      const result = await call<{ jobs: unknown[] }>("move_job", input);
-      return textResult("任务顺序已更新", { jobs: result.jobs });
-    },
-  );
-
-  server.registerTool(
-    "daemon_status",
-    {
-      description: "查看调度器进程的运行状态（是否活着、CLI 来源、正在执行的任务）。",
-      inputSchema: {},
-      annotations: { readOnlyHint: true },
-      _meta: toolUi(),
-    },
-    async () => {
-      const result = await call<{ status: Record<string, unknown> }>("status");
-      return textResult(JSON.stringify(result.status, null, 2), { status: result.status });
     },
   );
 
@@ -453,21 +433,20 @@ export async function main(): Promise<void> {
     `ui://${SERVER_NAME}/sessions.json`,
     { mimeType: "application/json" },
     async (uri) => {
-      try {
-        const result = await call<{ sessions: unknown[] }>("list_sessions", workspaceParams());
-        return {
-          contents: [
-            { uri: uri.href, mimeType: "application/json", text: JSON.stringify(result) },
-          ],
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          contents: [
-            { uri: uri.href, mimeType: "application/json", text: JSON.stringify({ error: message }) },
-          ],
-        };
-      }
+      const workspace = workspaceParams();
+      const sessions = store
+        .listWorkspaceTasks(workspace.workspacePath)
+        .map((task) => ({
+          sessionId: task.taskId,
+          title: task.title,
+          status: "",
+          updatedAt: task.updatedAt,
+        }));
+      return {
+        contents: [
+          { uri: uri.href, mimeType: "application/json", text: JSON.stringify({ sessions }) },
+        ],
+      };
     },
   );
 
@@ -476,30 +455,19 @@ export async function main(): Promise<void> {
     `ui://${SERVER_NAME}/jobs.json`,
     { mimeType: "application/json" },
     async (uri) => {
-      try {
-        const result = await call<{ jobs: unknown[] }>("list_jobs");
-        return {
-          contents: [
-            { uri: uri.href, mimeType: "application/json", text: JSON.stringify(result) },
-          ],
-        };
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        return {
-          contents: [
-            { uri: uri.href, mimeType: "application/json", text: JSON.stringify({ error: message }) },
-          ],
-        };
-      }
+      const jobs = store.list();
+      const runs = store.listRuns(undefined, 30);
+      return {
+        contents: [
+          {
+            uri: uri.href,
+            mimeType: "application/json",
+            text: JSON.stringify({ jobs, runs }),
+          },
+        ],
+      };
     },
   );
 
   await server.connect(new StdioServerTransport());
-
-  // 插件一加载就把调度器拉起来：到点就要能跑，不能等到用户点了工具才开工。
-  // pidfile 单例锁保证只有第一个会话会真的拉起它。
-  void getDaemon().catch((error) => {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`[${SERVER_NAME}] 调度器启动失败：${message}\n`);
-  });
 }

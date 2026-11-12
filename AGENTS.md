@@ -4,11 +4,10 @@
 
 ## 项目定位
 
-ZCode 任务调度插件。给**已有会话**或**新建会话**预定任务，到点由后台调度器执行（日夜皆可）；执行有闸门（并发上限、速率闸），失败会在**同一个会话**里续跑重试。
+ZCode 任务调度插件。给**已有会话**或**新建会话**预定任务，到点由**桌面端调度器**把消息投进目标会话执行（日夜皆可）。
 
 - 插件形态：一个 ZCode 插件（`ui.surfaces` 侧栏面板 + MCP server + skill + 斜杠命令）。
-- 执行引擎：独立常驻的 daemon 进程，通过 ZCode Protocol 驱动 ZCode 会话。
-- 需求与设计：见 `docs/issues/001-feat-夜间任务调度面板.md`（立项时的旧称，现为任务调度）。
+- 执行引擎：**桌面端自带**的调度器（`packages/desktop/src/scheduler`）。本插件只写数据，不跑进程。
 - 远程：`git@github.com:dreamariner/zcode-task-scheduler.git`，branch `main`。
 - 挂载点：根仓 `dreamariner/zcode-task-scheduler/`（submodule）。
 
@@ -19,37 +18,35 @@ ZCode 任务调度插件。给**已有会话**或**新建会话**预定任务，
    │  App.callServerTool → 宿主 → stdio JSON-RPC
    ▼
 MCP server（stdio；插件的薄控制面）
-   │  Unix socket ${ZCODE_PLUGIN_DATA}/daemon.sock
+   │  读写 ~/.zcode/v2/tasks-index.sqlite 的 automations / automation_runs
    ▼
-daemon（插件拉起的 detached 进程；执行面）
-   │  spawn: node <zcode.cjs> app-server
-   ▼
-ZCode 会话（resume 已有 / create 新建）
+桌面端调度器（宿主自带，20 秒轮询）认领 → host 在桌面端会话运行时里投递 prompt
 ```
 
 四条不可省的不变量：
 
-1. **MCP server 不能扛调度**。第三方插件的 `isolation` 声明会被忽略（官方 marketplace 之外一律按 session 隔离，见 `apps/zcode-cli/packages/adapters/src/plugins/mcp.ts`），且连接池在最后一个租约释放 30 秒后关闭连接（`adapters/src/mcp/pool.ts`）。所以调度必须在 daemon 里。
-2. **daemon 必须单例**。插件 MCP server 每次会话启动都会连一次，用 pidfile 挡住重复拉起。
-3. **重试必须回到同一个会话**。失败重试复用同一 `sessionId`，模型才能带着上下文接着做完；「新建会话」类型的任务在首次执行后绑定到那个新建出来的会话。
-4. **协议是双向的**。服务端会反向发请求（权限、运行时偏好、官方 MCP 鉴权头），客户端必须应答，否则回合一直挂着。
+1. **插件不自己执行**。执行发生在桌面端的会话运行时里，所以模型选择、上下文、鉴权都走桌面端当前状态，订阅账号模型（Start Plan 等）才能用。插件一旦自己拉 CLI 进程，就得自己解决凭据与鉴权，那条路走不通（见「踩过的坑」最后一条）。
+2. **只写带 `zts_` 前缀的行**。桌面端的 automations 表是用户自己的定时任务也在用的，插件不能碰别人的行。
+3. **写入形状必须与官方一致**。`model_selection` 用字面量 `"null"` 表示「跟随工作区首选」（SQL NULL 是缺配置，桌面端直接报「模型选择不可用」）；显式模型必须带 `options.reasoningLevel`。
+4. **协议是双向的**（插件仍与宿主对话）：宿主随工具调用注入 `_meta.session_id`，模型与指令都拿不到自己的会话 id。
 
 ## 目录结构
 
 ```
 zcode-task-scheduler/
-├── .zcode-plugin/plugin.json     # 插件清单：skills / commands / mcpServers / ui.surfaces / userConfig
+├── .zcode-plugin/plugin.json     # 插件清单：skills / commands / mcpServers / ui.surfaces
 ├── src/
-│   ├── shared/                   # 类型、路径解析、调度计算（三处共用）
-│   ├── protocol/                 # ZCode Protocol 客户端与会话网关
-│   ├── daemon/                   # 队列、限流、失败分类、执行器、调度循环、socket RPC
-│   ├── server/                   # MCP server 入口与 socket 客户端
-│   └── ui/                       # 侧栏面板（React + 官方 App 桥）
+│   ├── automation/                # 桌面端 automations 表读写（唯一执行面）
+│   │   ├── store.ts               # 建任务、改期、停用、立即执行、读运行记录
+│   │   └── migrate.ts             # 旧版 state.db 一次性迁移
+│   ├── server/                    # MCP server 入口与工具
+│   ├── shared/                    # 路径等少量共用
+│   └── ui/                        # 侧栏面板（React + 官方 App 桥）
 ├── skills/zcode-task-scheduler/  # 教模型用这套工具
-├── commands/                     # /schedule-plan、/schedule-here、/schedule-status
-├── scripts/                      # build / stage / 联调探针
-├── tests/                        # vitest
-└── stage/                        # 可安装产物（构建生成，不入库）
+├── commands/                      # /schedule-plan、/schedule-here、/schedule-status
+├── scripts/                       # build / stage
+├── tests/                         # vitest
+└── stage/                         # 可安装产物（构建生成，不入库）
 ```
 
 ## 常用命令
@@ -59,9 +56,7 @@ pnpm install          # 装依赖
 pnpm build            # 构建 + 产出 stage/ 可安装目录
 pnpm typecheck        # 类型检查
 pnpm test             # 单测
-pnpm stage            # 只重做 stage/ 产物
-node scripts/e2e-probe.mjs <工作区> <sessionId|new> "任务内容"   # 端到端联调
-node scripts/daemon-lifecycle-probe.mjs <工作区>                 # 验调度器扛得住会话回收
+node scripts/stage.mjs                                          # 只重做 stage/ 产物
 ```
 
 装到 ZCode（CLI 与桌面端用同一份配置）：
@@ -76,16 +71,16 @@ node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --sc
 ## 红线
 
 - 构建产物不入库（`dist/`、`stage/` 已在 `.gitignore`）。
-- 运行期状态只落 `${ZCODE_PLUGIN_DATA}`，不进版本库。
 - 仓库里不出现密钥、token、本机绝对路径、用户会话内容。
 - 行文不用破折号「——」。
 - 公开仓对外不提及内部项目名。
-- 改动 `src/protocol/` 时先对照官方源码：`zai-org/ZCode`（本机检出路径见 README）。
+- 改动 `src/automation/` 时先对照官方源码：`zai-org/ZCode`（本机检出路径见 README）。
 
 ## 踩过的坑（宿主行为，改代码前先看这里）
 
 - **插件 MCP server 只在会话创建时并进运行时配置**。先开会话、后装插件（或重装插件），那个会话里就没有本插件的 MCP server，面板直接报 `MCP App connection is unavailable`。宿主不会自动刷新已开会话的 MCP 配置，只能重建会话运行时（应用头部「重新加载会话」，或重新打开该会话）。
-- **宿主回收会话级 MCP server 时按 PPID 树杀整棵子树**（SIGINT → SIGTERM → SIGKILL，见官方 `apps/zcode-cli/packages/adapters/src/mcp/process-tree.ts`）。调度器必须用两次 fork 脱离这棵树，否则会话一关，夜里就没人干活了。
-- **第三方插件声明的 `isolation` 会被忽略**（官方源才认），插件 MCP server 一律会话级；最后一个租约释放 30 秒后连接关闭、子进程被杀。
-- **面板只能开在会话侧栏**，`availability` 只接受 `session`；页面没有任何会话 API，切不了也建不了宿主会话。
-- **账号型模型（Start Plan 等订阅账号）天然不在模型目录里，别试图修**。账号供应商在磁盘 builtin 配置里只是声明壳（`entitled` 为空不发布模型）；`entitled: true`、当前连接状态和每次请求的鉴权头全由桌面端宿主运行时注入（宿主推 `provider/updateAccountConfig` 账号快照；CLI 执行账号模型前经 `interaction/requestProviderRuntimeHeaders` 反查宿主拿鉴权头）。daemon 拉起的 CLI 进程树里没有宿主，账号覆盖为空（fail-closed），目录里就没有 account: 条目；显式下发会在 `session/send` 被「Provider Registry 中不存在 Model」拒绝。桌面端独立 headless CLI 同样不行：其账号目录只管 `individual-coding-plan` 模式的供应商，Start Plan 是宿主专属。可选模型的实际能力域就是 API 型供应商（用户配了 key 的那些）。
+- **宿主回收会话级 MCP server 时按 PPID 树杀整棵子树**（SIGINT → SIGTERM → SIGKILL，见官方 `apps/zcode-cli/packages/adapters/src/mcp/process-tree.ts`）。
+- **第三方插件声明的 `isolation` 会被忽略**（官方源才认），插件 MCP server 一律会话级。
+- **面板只能开在会话侧栏**，`availability` 只接受 `session`；页面没有任何会话 API。
+- **桌面端 automations 表的写入契约很挑**：`model_selection` 必须是字符串 `'null'`（跟随工作区首选）或完整 JSON（显式模型，且带 `options.reasoningLevel`），SQL NULL 会被判为「缺配置」直接拒绝派发；`cron_expr` 是五段式（分 时 日 月 周），一次性任务用 `recurring=0, max_runs=1`。
+- **账号型模型不要在插件侧解决鉴权**。账号供应商（`account:` 前缀）的权益事实由桌面端运行时注入，请求期鉴权材料由桌面端解析后应答，worker 侧拿不到；桌面端 3.18 还把凭据升级成 `enc:v2:os:` 第二版加密，密钥只存系统钥匙串，插件无权访问。因此正确做法就是把执行交回桌面端：写一行 automations，让它在自己的运行时里投递。**不要试图在插件里复刻桌面端的凭据体系。**

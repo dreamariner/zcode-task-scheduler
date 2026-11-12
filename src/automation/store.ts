@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 import { randomUUID } from "node:crypto";
 import { Cron } from "croner";
+import { recordAnchor } from "../gate/anchors.js";
 
 /**
  * 桌面端调度器的数据面。
@@ -115,6 +116,7 @@ export interface AutomationRow extends AutomationJob {
 export interface StoreOptions {
   tasksIndexPath?: string;
   log?: (message: string) => void;
+  env?: NodeJS.ProcessEnv;
 }
 
 function pad(value: number): string {
@@ -269,10 +271,12 @@ function toRow(row: AutomationDbRow): AutomationRow {
 export class AutomationStore {
   private readonly path: string;
   private readonly log: (message: string) => void;
+  private readonly env: NodeJS.ProcessEnv;
 
   constructor(options: StoreOptions = {}) {
     this.path = options.tasksIndexPath ?? defaultTasksIndexPath();
     this.log = options.log ?? (() => undefined);
+    this.env = options.env ?? process.env;
   }
 
   /** 打开库并确认表结构可用；表不存在时返回 null（桌面端还没初始化过索引）。 */
@@ -415,6 +419,10 @@ export class AutomationStore {
       });
       const created = this.get(automationId);
       if (!created) throw new Error("任务写入后读不回来");
+      // 一次性任务记下确切执行时刻：cron 的月日推不出年份，节流闸要靠锚点判定到期。
+      if (!recurring && typeof job.schedule.runAt === "number") {
+        recordAnchor(this.env, automationId, job.schedule.runAt);
+      }
       return created;
     } finally {
       db.close();
@@ -469,7 +477,128 @@ export class AutomationStore {
         automation_id: automationId,
       });
       const updated = this.get(automationId);
+      // 一次性任务改期：锚点跟着更新，否则闸门还按旧时刻判定到期。
+      if (patch.schedule && patch.schedule.kind === "once" && typeof patch.schedule.runAt === "number") {
+        recordAnchor(this.env, automationId, patch.schedule.runAt);
+      }
       return updated;
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * 把任务的下次执行时刻推到指定时刻（节流闸用）。
+   *
+   * 只改 next_run_at，不动 cron_expr：桌面端认领后仍按自己的 cron 结算，
+   * 跑完重新算 next_run_at 时节流的影响自然消失。
+   */
+  setNextRunAt(automationId: string, nextRunAt: number): boolean {
+    const db = this.open();
+    if (!db) return false;
+    try {
+      const result = db
+        .prepare("UPDATE automations SET next_run_at = ?, updated_at = ? WHERE automation_id = ?")
+        .run(nextRunAt, Date.now(), automationId);
+      return result.changes === 1;
+    } catch {
+      return false;
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * 在投中的任务数。
+   *
+   * 判据不是 automations.running：桌面端在「投递请求发出」的瞬间就把 running 置 0
+   * （markDispatched），它只覆盖派发动作本身，不代表任务还在跑。真正的在投信号是
+   * automation_runs 里 outcome 仍为 'running' 的 run（桌面端在回合终态时回写终态）。
+   */
+  inFlightCount(): number {
+    const db = this.open();
+    if (!db) return 0;
+    try {
+      const row = db
+        .prepare(
+          `SELECT COUNT(DISTINCT r.automation_id) AS total FROM automation_runs r
+           JOIN automations a ON a.automation_id = r.automation_id
+           WHERE a.automation_id LIKE ? AND r.outcome = 'running'`,
+        )
+        .get(`${AUTOMATION_ID_PREFIX}%`) as { total: number };
+      return row.total;
+    } catch {
+      return 0;
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * 在投中的任务（已投递、回合未终结）。
+   *
+   * 同会话的顺序保证依赖这个判据：同会话的前一条还在跑，后一条就不能投。
+   */
+  inFlightTasks(): { automationId: string; targetSessionId: string | null }[] {
+    const db = this.open();
+    if (!db) return [];
+    try {
+      const rows = db
+        .prepare(
+          `SELECT DISTINCT r.automation_id AS automation_id, a.target_task_id AS target_task_id
+           FROM automation_runs r
+           JOIN automations a ON a.automation_id = r.automation_id
+           WHERE a.automation_id LIKE ? AND r.outcome = 'running'`,
+        )
+        .all(`${AUTOMATION_ID_PREFIX}%`) as { automation_id: string; target_task_id: string | null }[];
+      return rows.map((row) => ({
+        automationId: row.automation_id,
+        targetSessionId: row.target_task_id,
+      }));
+    } catch {
+      return [];
+    } finally {
+      db.close();
+    }
+  }
+
+  /**
+   * 待投的「立即执行」队列。
+   *
+   * 桌面端只认领 dispatch_status='claimed' 的 manual run，所以排队中的 run 用
+   * 'pending' 存着，等节流闸腾出槽位再翻成 'claimed'，桌面端下一轮就会认领。
+   */
+  listPendingManualRuns(limit = 20): { runId: string; automationId: string }[] {
+    const db = this.open();
+    if (!db) return [];
+    try {
+      const rows = db
+        .prepare(
+          `SELECT r.run_id, r.automation_id FROM automation_runs r
+           JOIN automations a ON a.automation_id = r.automation_id
+           WHERE a.automation_id LIKE ? AND r.trigger = 'manual' AND r.dispatch_status = 'pending'
+           ORDER BY r.created_at ASC LIMIT ?`,
+        )
+        .all(`${AUTOMATION_ID_PREFIX}%`, limit) as { run_id: string; automation_id: string }[];
+      return rows.map((row) => ({ runId: row.run_id, automationId: row.automation_id }));
+    } catch {
+      return [];
+    } finally {
+      db.close();
+    }
+  }
+
+  /** 把排队的「立即执行」翻成可认领状态（节流闸放行时调用）。 */
+  releasePendingManualRun(runId: string): boolean {
+    const db = this.open();
+    if (!db) return false;
+    try {
+      const result = db
+        .prepare("UPDATE automation_runs SET dispatch_status = 'claimed', updated_at = ? WHERE run_id = ?")
+        .run(Date.now(), runId);
+      return result.changes === 1;
+    } catch {
+      return false;
     } finally {
       db.close();
     }
@@ -481,8 +610,7 @@ export class AutomationStore {
     if (!db) return false;
     try {
       db.prepare("DELETE FROM automation_runs WHERE automation_id = ?").run(automationId);
-      const result = db.prepare("DELETE FROM automations WHERE automation_id = ?").run(automationId);
-      return result.changes === 1;
+      const result = db.prepare("DELETE FROM automations WHERE automation_id = ?").run(automationId);      return result.changes === 1;
     } finally {
       db.close();
     }
@@ -498,8 +626,14 @@ export class AutomationStore {
    * - **不占** automations.running 锁：调度器的认领条件要求 a.running=0，由它自己占锁。
    *
    * manual run 不推进 next_run_at，也不改生命周期：跑这一次不影响原排期。
+   *
+   * queued=true 时写成 dispatch_status='pending'：桌面端只认领 'claimed'，所以这行
+   * 会静静等着，等节流闸腾出槽位再翻成 'claimed'（并发满时排队，不绕过闸门）。
    */
-  enqueueManualRun(automationId: string): { runId: string } | null {
+  enqueueManualRun(
+    automationId: string,
+    options: { queued?: boolean } = {},
+  ): { runId: string; queued: boolean } | null {
     const db = this.open();
     if (!db) return null;
     try {
@@ -525,17 +659,18 @@ export class AutomationStore {
             model_selection, dispatch_status, attempts, created_at, updated_at
           ) VALUES (
             @run_id, @automation_id, @workspace_key, @scheduled_at, 'manual',
-            NULL, 'claimed', 0, @now, @now
+            NULL, @dispatch_status, 0, @now, @now
           )`,
         ).run({
           run_id: runId,
           automation_id: automationId,
           workspace_key: current.workspace_key,
           scheduled_at: now,
+          dispatch_status: options.queued ? "pending" : "claimed",
           now,
         });
         db.exec("COMMIT");
-        return { runId };
+        return { runId, queued: options.queued === true };
       } catch (error) {
         db.exec("ROLLBACK");
         throw error;

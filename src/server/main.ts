@@ -6,6 +6,8 @@ import { z } from "zod";
 import { pluginRoot } from "../shared/paths.js";
 import { requireSessionId } from "./session-context.js";
 import { migrateLegacyJobs } from "../automation/migrate.js";
+import { ensureGatekeeper } from "../gate/spawn.js";
+import { MAX_CONCURRENT } from "../gate/runner.js";
 import {
   AUTOMATION_LIMIT,
   AutomationStore,
@@ -142,7 +144,7 @@ function statusText(row: {
 }): string {  if (!row.enabled) return "已停用";
   if (row.lifecycleStatus === "completed") return "已完成";
   if (row.lifecycleStatus === "failed") return "已失败";
-  if (row.running) return "执行中";
+  if (row.running) return "在投中";
   return row.lastRunAt ? "已排队" : "待执行";
 }
 
@@ -165,6 +167,16 @@ export async function main(): Promise<void> {
       `[${SERVER_NAME}] 已迁移 ${migrated.migrated} 条旧任务到桌面端调度器\n`,
     );
   }
+
+  // 节流闸：桌面端调度器没有并发闸（一次认领所有到期任务），节流必须由插件这一侧
+  // 管。闸门是常驻进程，用两次 fork 脱离会话进程树；插件一加载就把它拉起来。
+  const gateLog = (message: string): void => {
+    process.stderr.write(`[${SERVER_NAME}] ${message}\n`);
+  };
+  const ensureGate = (): void => {
+    ensureGatekeeper({ env: process.env, log: gateLog });
+  };
+  ensureGate();
 
   // ── 工具 ──
 
@@ -204,14 +216,30 @@ export async function main(): Promise<void> {
       _meta: toolUi(),
     },
     async () => {
+      ensureGate();
       const jobs = store.list();
-      const lines = jobs.map((job) => {
+      const inFlightIds = new Set(store.inFlightTasks().map((item) => item.automationId));
+      // 在投标记按「回合未终结」判定，与节流闸同一判据；面板徽标据此显示。
+      const jobViews = jobs.map((job) => ({
+        ...job,
+        running: inFlightIds.has(job.automationId),
+      }));
+      const concurrency = {
+        max: MAX_CONCURRENT,
+        inFlight: inFlightIds.size,
+        waiting: store.listPendingManualRuns().length,
+        inFlightTitles: jobs
+          .filter((job) => inFlightIds.has(job.automationId))
+          .map((job) => job.title),
+      };
+      const lines = jobViews.map((job) => {
         const due = job.nextRunAt ? new Date(job.nextRunAt).toLocaleString("zh-CN") : "无下次计划";
         return `${job.automationId}\t${job.title}\t${statusText(job)}\t下次 ${due}`;
       });
+      const head = `在投 ${concurrency.inFlight}/${concurrency.max}${concurrency.waiting > 0 ? `，排队 ${concurrency.waiting}` : ""}`;
       return textResult(
-        lines.length > 0 ? ["任务列表：", ...lines].join("\n") : "还没有登记任何任务。",
-        { jobs },
+        lines.length > 0 ? [head, "任务列表：", ...lines].join("\n") : [head, "还没有登记任何任务。"].join("\n"),
+        { jobs: jobViews, concurrency },
       );
     },
   );
@@ -345,21 +373,44 @@ export async function main(): Promise<void> {
       _meta: toolUi(),
     },
     async (input) => {
+      ensureGate();
       const targets = input.jobId
         ? [input.jobId]
         : store.list().filter((job) => job.enabled).map((job) => job.automationId);
+      const jobs = store.list();
+      const inFlight = store.inFlightTasks();
       const started: string[] = [];
+      const queued: string[] = [];
       const busy: string[] = [];
       for (const id of targets) {
-        const result = store.enqueueManualRun(id);
-        if (result) started.push(id);
-        else busy.push(id);
+        const job = jobs.find((item) => item.automationId === id);
+        if (!job) {
+          busy.push(id);
+          continue;
+        }
+        // 并发满，或同会话已有在投任务：排队等待，不绕过闸门。
+        const sessionBusy = job.targetSessionId
+          ? inFlight.some((item) => item.targetSessionId === job.targetSessionId)
+          : false;
+        const needQueue = inFlight.length + started.length >= MAX_CONCURRENT || sessionBusy;
+        const result = store.enqueueManualRun(id, { queued: needQueue });
+        if (!result) {
+          busy.push(id);
+          continue;
+        }
+        if (result.queued) queued.push(id);
+        else started.push(id);
       }
       const parts: string[] = [];
       if (started.length > 0) parts.push(`已开始执行：${started.join("、")}`);
+      if (queued.length > 0) {
+        parts.push(
+          `并发已满或同会话正在执行，已排队等待：${queued.join("、")}（最多同时 ${MAX_CONCURRENT} 条在投）`,
+        );
+      }
       if (busy.length > 0) parts.push(`已在执行中（未重复投递）：${busy.join("、")}`);
       if (parts.length === 0) parts.push("没有可执行的任务。");
-      return textResult(parts.join("\n"), { started, busy });
+      return textResult(parts.join("\n"), { started, queued, busy });
     },
   );
 
@@ -375,22 +426,38 @@ export async function main(): Promise<void> {
       _meta: toolUi(),
     },
     async (input) => {
-      const summary = store.list().map((job) => ({
+      ensureGate();
+      const jobs = store.list();
+      const inFlightIds = new Set(store.inFlightTasks().map((item) => item.automationId));
+      const summary = jobs.map((job) => ({
         jobId: job.automationId,
         title: job.title,
         lastStatus: statusText(job),
         nextRunAt: job.nextRunAt,
         consecutiveFailures: 0,
         enabled: job.enabled,
+        // 在投 = 回合未终结（与节流闸同一个判据）。
+        running: inFlightIds.has(job.automationId),
+        targetSessionId: job.targetSessionId,
       }));
       const runs = store.listRuns(input.jobId, input.limit ?? 30);
+      const waiting = store.listPendingManualRuns().length;
+      const concurrency = {
+        max: MAX_CONCURRENT,
+        inFlight: inFlightIds.size,
+        waiting,
+        inFlightTitles: jobs
+          .filter((job) => inFlightIds.has(job.automationId))
+          .map((job) => job.title),
+      };
       const lines = summary.map((item) => {
         const due = item.nextRunAt ? new Date(item.nextRunAt).toLocaleString("zh-CN") : "无";
         return `${item.title}\t${item.lastStatus}\t下次 ${due}`;
       });
+      const head = `在投 ${concurrency.inFlight}/${concurrency.max}${concurrency.waiting > 0 ? `，排队 ${concurrency.waiting}` : ""}`;
       return textResult(
-        lines.length > 0 ? ["任务状态：", ...lines].join("\n") : "还没有任务。",
-        { summary, runs },
+        lines.length > 0 ? [head, "任务状态：", ...lines].join("\n") : [head, "还没有任务。"].join("\n"),
+        { summary, runs, concurrency },
       );
     },
   );

@@ -40,6 +40,13 @@ interface RunRecord {
   createdAt: number;
 }
 
+interface ConcurrencyInfo {
+  max: number;
+  inFlight: number;
+  waiting: number;
+  inFlightTitles: string[];
+}
+
 const app = new App(
   { name: "zcode-task-scheduler", version: "0.1.0" },
   { tools: { listChanged: true }, availableDisplayModes: ["inline", "fullscreen"] },
@@ -128,7 +135,7 @@ function jobStatus(job: Job): { tone: string; text: string } {
   if (!job.enabled) return { tone: "idle", text: "已停用" };
   if (job.lifecycleStatus === "completed") return { tone: "ok", text: "已完成" };
   if (job.lifecycleStatus === "failed") return { tone: "bad", text: "已失败" };
-  if (job.running) return { tone: "busy", text: "执行中" };
+  if (job.running) return { tone: "busy", text: "在投中" };
   if (job.lastRunAt) return { tone: "ok", text: "已执行" };
   return { tone: "idle", text: "待执行" };
 }
@@ -176,6 +183,7 @@ function App_(): JSX.Element {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
   const [runs, setRuns] = useState<RunRecord[]>([]);
+  const [concurrency, setConcurrency] = useState<ConcurrencyInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -202,13 +210,14 @@ function App_(): JSX.Element {
   const refresh = useCallback(async () => {
     try {
       const [jobResult, sessionResult, statusResult] = await Promise.all([
-        callTool("list_jobs") as Promise<{ jobs: Job[] }>,
+        callTool("list_jobs") as Promise<{ jobs: Job[]; concurrency?: ConcurrencyInfo }>,
         callTool("list_sessions") as Promise<{ sessions: SessionSummary[] }>,
-        callTool("job_status") as Promise<{ runs: RunRecord[] }>,
+        callTool("job_status") as Promise<{ runs: RunRecord[]; concurrency?: ConcurrencyInfo }>,
       ]);
       setJobs(jobResult.jobs ?? []);
       setSessions(sessionResult.sessions ?? []);
       setRuns(statusResult.runs ?? []);
+      setConcurrency(jobResult.concurrency ?? statusResult.concurrency ?? null);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -338,8 +347,11 @@ function App_(): JSX.Element {
       </header>
 
       <div className="daemon-hint">
-        任务由桌面端自己的调度器到点投递：执行发生在目标会话里，模型与鉴权都走桌面端
-        当前的会话设置（订阅账号模型可用）。桌面端需要开着；关机或退出期间错过的时间点不会补跑。
+        {concurrency
+          ? `在投 ${concurrency.inFlight}/${concurrency.max}${
+              concurrency.waiting > 0 ? `，排队 ${concurrency.waiting}` : ""
+            }：任务由桌面端调度器到点投递，最多同时 ${concurrency.max} 条在投，同一会话的任务按登记顺序串行投递。`
+          : "任务由桌面端调度器到点投递：最多同时 3 条在投，同一会话的任务按登记顺序串行投递。"}
       </div>
 
       {error ? <div className="banner error">{error}</div> : null}
@@ -364,8 +376,7 @@ function App_(): JSX.Element {
                     <span>{describeModel(job)}</span>
                     <span>下次 {formatTime(job.nextRunAt)}</span>
                     <span>已执行 {job.runCount} 次</span>
-                  </div>
-                  {job.lastError ? <div className="job-error">{job.lastError}</div> : null}
+                  </div>                  {job.lastError ? <div className="job-error">{job.lastError}</div> : null}
                   {editingJobId === job.automationId ? (
                     <div className="edit-box">
                       <label>

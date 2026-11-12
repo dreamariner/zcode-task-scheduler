@@ -73,6 +73,7 @@ async function main() {
   }
 
   await buildNode("src/server/entry.ts", "server.mjs");
+  await buildNode("src/gate/entry.ts", "gate.mjs");
   await buildUi();
   console.log(`构建完成：${dist}`);
 }

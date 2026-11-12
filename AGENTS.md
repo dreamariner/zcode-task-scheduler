@@ -28,7 +28,7 @@ MCP server（stdio；插件的薄控制面）
 1. **插件不自己执行**。执行发生在桌面端的会话运行时里，所以模型选择、上下文、鉴权都走桌面端当前状态，订阅账号模型（Start Plan 等）才能用。插件一旦自己拉 CLI 进程，就得自己解决凭据与鉴权，那条路走不通（见「踩过的坑」最后一条）。
 2. **只写带 `zts_` 前缀的行**。桌面端的 automations 表是用户自己的定时任务也在用的，插件不能碰别人的行。
 3. **写入形状必须与官方一致**。`model_selection` 用字面量 `"null"` 表示「跟随工作区首选」（SQL NULL 是缺配置，桌面端直接报「模型选择不可用」）；显式模型必须带 `options.reasoningLevel`。
-4. **协议是双向的**（插件仍与宿主对话）：宿主随工具调用注入 `_meta.session_id`，模型与指令都拿不到自己的会话 id。
+4. **节流由插件侧管**。桌面端调度器没有并发闸（一次认领所有到期任务全派发），所以插件用 `src/gate/` 的闸门控制「任务何时处于到期状态」：桌面端只认领 `next_run_at` 已到的任务，闸门批准谁，谁才允许到期。
 
 ## 目录结构
 
@@ -39,6 +39,11 @@ zcode-task-scheduler/
 │   ├── automation/                # 桌面端 automations 表读写（唯一执行面）
 │   │   ├── store.ts               # 建任务、改期、停用、立即执行、读运行记录
 │   │   └── migrate.ts             # 旧版 state.db 一次性迁移
+│   ├── gate/                      # 投递节流闸（并发上限 + 同会话顺序）
+│   │   ├── gate.ts                # 判定逻辑（纯函数，可单测）
+│   │   ├── runner.ts              # 常驻闸门进程（两次 fork 脱离会话树）
+│   │   ├── spawn.ts               # 从 MCP server 拉起闸门
+│   │   └── anchors.ts             # 一次性任务的执行时刻锚点
 │   ├── server/                    # MCP server 入口与工具
 │   ├── shared/                    # 路径等少量共用
 │   └── ui/                        # 侧栏面板（React + 官方 App 桥）
@@ -84,3 +89,5 @@ node "$CLI" plugins install zcode-task-scheduler@zcode-task-scheduler-local --sc
 - **面板只能开在会话侧栏**，`availability` 只接受 `session`；页面没有任何会话 API。
 - **桌面端 automations 表的写入契约很挑**：`model_selection` 必须是字符串 `'null'`（跟随工作区首选）或完整 JSON（显式模型，且带 `options.reasoningLevel`），SQL NULL 会被判为「缺配置」直接拒绝派发；`cron_expr` 是五段式（分 时 日 月 周），一次性任务用 `recurring=0, max_runs=1`。
 - **账号型模型不要在插件侧解决鉴权**。账号供应商（`account:` 前缀）的权益事实由桌面端运行时注入，请求期鉴权材料由桌面端解析后应答，worker 侧拿不到；桌面端 3.18 还把凭据升级成 `enc:v2:os:` 第二版加密，密钥只存系统钥匙串，插件无权访问。因此正确做法就是把执行交回桌面端：写一行 automations，让它在自己的运行时里投递。**不要试图在插件里复刻桌面端的凭据体系。**
+- **「在投」不能用 `automations.running` 判断**。桌面端在投递瞬间（`markDispatched`）就把 `running` 置 0，它只覆盖派发动作本身，不代表任务还在跑。真正的在投信号是 `automation_runs.outcome` 仍为 `'running'` 的行（回合终态时桌面端才回写终态）。
+- **一次性任务的 cron 推不出年份**。插件登记一次性任务时必须把确切时刻记进锚点表（`${ZCODE_PLUGIN_DATA}/gate-anchors.json`），否则闸门按 cron 推算会推到明年，任务永远等不到期。

@@ -429,7 +429,10 @@ export class AutomationStore {
     }
   }
 
-  /** 改期（重算 cron 与 next_run_at）、改内容、停用或启用。 */
+  /**
+   * 改期（重算 cron 与 next_run_at）、改内容、换目标会话、换执行模型、停用或启用。
+   * targetSessionId 与 model 用 undefined 表示「不改动」；model 为 null 表示跟随工作区首选。
+   */
   update(
     automationId: string,
     patch: {
@@ -437,6 +440,8 @@ export class AutomationStore {
       prompt?: string;
       enabled?: boolean;
       schedule?: ScheduleInput;
+      targetSessionId?: string | null;
+      model?: ModelOverride | null;
     },
   ): AutomationRow | null {
     const db = this.open();
@@ -458,7 +463,8 @@ export class AutomationStore {
       db.prepare(
         `UPDATE automations SET title = @title, prompt = @prompt, enabled = @enabled,
            cron_expr = @cron_expr, next_run_at = @next_run_at, recurring = @recurring,
-           max_runs = @max_runs, updated_at = @now
+           max_runs = @max_runs, target_task_id = @target_task_id,
+           model_selection = @model_selection, updated_at = @now
          WHERE automation_id = @automation_id`,
       ).run({
         title: patch.title ?? current.title,
@@ -473,6 +479,10 @@ export class AutomationStore {
               ? 1
               : null
             : current.max_runs,
+        // undefined 表示不改动；null（跟随会话）与显式模型都正常落列。
+        target_task_id: patch.targetSessionId !== undefined ? patch.targetSessionId : current.target_task_id,
+        model_selection:
+          patch.model !== undefined ? serializeModelSelection(patch.model) : current.model_selection,
         now,
         automation_id: automationId,
       });

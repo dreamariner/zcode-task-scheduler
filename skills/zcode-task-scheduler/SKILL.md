@@ -23,7 +23,7 @@ description: Use when the user wants to schedule work for later, queue a task on
 | `list_jobs` | 列已登记的任务 |
 | `add_job` | 登记任务（目标要给会话 id 或新建会话） |
 | `add_job_here` | 给当前会话登记任务（目标自动取当前会话，只能在会话内用） |
-| `update_job` | 改期、改内容、停用或启用 |
+| `update_job` | 编辑任务：改期、改内容、换目标会话、换执行模型、停用或启用。没给的字段保持不变（部分更新，模型这点与 `add_job` 的默认兜底不同） |
 | `remove_job` | 删除任务 |
 | `run_now` | 立即执行一轮 |
 | `job_status` | 任务状态与最近运行记录 |
@@ -84,6 +84,27 @@ description: Use when the user wants to schedule work for later, queue a task on
 `reasoningLevel` 必填：桌面端派发前会校验模型与思考档位，缺档位会被判为「模型选择不可用」而拒绝执行。
 
 想完全跟随会话当前模型就传 `"followSessionModel": true`（注意：会话里若选的是夜间套餐，白天执行会失败）。
+
+### 编辑已有任务
+
+`update_job` 是部分更新，只传要改的字段，没传的保持不变。比如把已有任务改到 03:30 并换成夜间套餐模型：
+
+```json
+{
+  "name": "update_job",
+  "arguments": {
+    "jobId": "zts_xxx",
+    "timeOfDay": 12600000,
+    "model": {
+      "providerId": "account:bigmodel-start-plan",
+      "modelId": "GLM-5.3-Flash",
+      "reasoningLevel": "max"
+    }
+  }
+}
+```
+
+换目标会话传 `targetSessionId`（null 表示到点新建会话）；改回跟随会话传 `"followSessionModel": true`。
 
 ## 注意
 

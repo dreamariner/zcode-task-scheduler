@@ -324,13 +324,20 @@ export async function main(): Promise<void> {
   server.registerTool(
     "update_job",
     {
-      description: "修改任务：改期、改内容、停用或启用。",
+      description:
+        "修改任务：改期、改内容、换目标会话、换执行模型、停用或启用。没给的字段保持不变。",
       inputSchema: {
         jobId: z.string().min(1),
-        title: z.string().optional(),
-        prompt: z.string().optional(),
-        enabled: z.boolean().optional(),
+        title: z.string().optional().describe("任务标题"),
+        prompt: z.string().optional().describe("任务内容"),
+        enabled: z.boolean().optional().describe("停用或启用"),
+        targetSessionId: z
+          .string()
+          .nullable()
+          .optional()
+          .describe("目标会话 id；null 表示到点时新建会话"),
         ...scheduleShape,
+        ...modelShape,
       },
       _meta: toolUi(),
     },
@@ -340,14 +347,27 @@ export async function main(): Promise<void> {
         input.runAt !== undefined ||
         input.timeOfDay !== undefined ||
         input.weekdays !== undefined;
+      // 模型用「没给就不动」语义（与 add_job 的默认兜底不同）：改编辑面板常用部分更新。
+      const model = input.followSessionModel
+        ? null
+        : input.model
+          ? {
+              providerId: input.model.providerId,
+              modelId: input.model.modelId,
+              reasoningLevel: input.model.reasoningLevel,
+            }
+          : undefined;
       const job = store.update(input.jobId, {
         ...(input.title !== undefined ? { title: input.title } : {}),
         ...(input.prompt !== undefined ? { prompt: input.prompt } : {}),
         ...(input.enabled !== undefined ? { enabled: input.enabled } : {}),
+        ...(input.targetSessionId !== undefined ? { targetSessionId: input.targetSessionId } : {}),
         ...(hasSchedule ? { schedule: scheduleOf(input) } : {}),
+        ...(model !== undefined ? { model } : {}),
       });
       if (!job) throw new Error(`任务 ${input.jobId} 不存在`);
-      return textResult(`任务 ${input.jobId} 已更新`, { job });
+      const due = job.nextRunAt ? new Date(job.nextRunAt).toLocaleString("zh-CN") : "未排期";
+      return textResult(`任务 ${input.jobId} 已更新，下次执行 ${due}`, { job });
     },
   );
 

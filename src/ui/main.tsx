@@ -153,6 +153,50 @@ const RUN_TONE: Record<string, string> = {
 
 const WEEKDAY_NAMES = ["日", "一", "二", "三", "四", "五", "六"] as const;
 
+/** 与服务端 add_job 默认一致的模型；编辑框选默认项时显式写回这三个值。 */
+const DEFAULT_MODEL_FORM = {
+  providerId: "minimax",
+  modelId: "MiniMax-M3.1-Flash",
+  reasoningLevel: "max",
+} as const;
+
+/** 从任务的 model_selection 反推编辑框模型表单的初值。 */
+function modelFormInit(job: Job): {
+  mode: "minimax" | "follow" | "custom";
+  provider: string;
+  modelId: string;
+  reasoning: string;
+} {
+  const fallback = { mode: "minimax" as const, provider: "", modelId: "", reasoning: "max" };
+  if (!job.modelSelection || job.modelSelection === "null") {
+    return { mode: "follow", provider: "", modelId: "", reasoning: "max" };
+  }
+  try {
+    const parsed = JSON.parse(job.modelSelection) as {
+      providerId?: string;
+      modelId?: string;
+      options?: { reasoningLevel?: string };
+    };
+    const reasoning = parsed.options?.reasoningLevel ?? "max";
+    // 与新建表单默认项完全一致才归入默认；否则按指定模型回填，避免保存时静默改值。
+    if (
+      parsed.providerId === DEFAULT_MODEL_FORM.providerId &&
+      parsed.modelId === DEFAULT_MODEL_FORM.modelId &&
+      reasoning === DEFAULT_MODEL_FORM.reasoningLevel
+    ) {
+      return fallback;
+    }
+    return {
+      mode: "custom",
+      provider: parsed.providerId ?? "",
+      modelId: parsed.modelId ?? "",
+      reasoning,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 function WeekdayPicker({
   value,
   onChange,
@@ -202,10 +246,18 @@ function App_(): JSX.Element {
   const [reasoningLevel, setReasoningLevel] = useState("max");
 
   const [editingJobId, setEditingJobId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState("");
+  const [editPrompt, setEditPrompt] = useState("");
+  const [editTargetKind, setEditTargetKind] = useState<"session" | "new-session">("session");
+  const [editSessionId, setEditSessionId] = useState("");
   const [editKind, setEditKind] = useState<"once" | "daily" | "weekly">("daily");
   const [editRunAt, setEditRunAt] = useState("");
   const [editTime, setEditTime] = useState("00:30");
   const [editWeekdays, setEditWeekdays] = useState<number[]>([0]);
+  const [editModelMode, setEditModelMode] = useState<"minimax" | "follow" | "custom">("minimax");
+  const [editModelProvider, setEditModelProvider] = useState("");
+  const [editModelId, setEditModelId] = useState("");
+  const [editReasoningLevel, setEditReasoningLevel] = useState("max");
 
   const refresh = useCallback(async () => {
     try {
@@ -299,34 +351,88 @@ function App_(): JSX.Element {
   ]);
 
   const startEdit = useCallback((job: Job) => {
+    const modelForm = modelFormInit(job);
     setEditingJobId(job.automationId);
+    setEditTitle(job.title);
+    setEditPrompt(job.prompt);
+    setEditTargetKind(job.targetSessionId ? "session" : "new-session");
+    setEditSessionId(job.targetSessionId ?? "");
     setEditKind(job.schedule.kind);
     setEditRunAt(
       job.schedule.kind === "once" && job.schedule.runAt ? toLocalInput(job.schedule.runAt) : "",
     );
     setEditTime(formatClock(job.schedule.timeOfDay));
     setEditWeekdays(job.schedule.weekdays ?? [0]);
+    setEditModelMode(modelForm.mode);
+    setEditModelProvider(modelForm.provider);
+    setEditModelId(modelForm.modelId);
+    setEditReasoningLevel(modelForm.reasoning);
   }, []);
 
   const saveEdit = useCallback(async () => {
     if (!editingJobId) return;
+    if (editTargetKind === "session" && !editSessionId) {
+      setError("编辑目标请先选择会话");
+      return;
+    }
+    if (!editPrompt.trim()) {
+      setError("任务内容不能为空");
+      return;
+    }
+    if (editKind === "once" && !editRunAt) {
+      setError("一次性任务请先选择执行时刻");
+      return;
+    }
     if (editKind === "weekly" && editWeekdays.length === 0) {
       setError("每周任务至少选择一天");
+      return;
+    }
+    if (editModelMode === "custom" && (!editModelProvider.trim() || !editModelId.trim())) {
+      setError("指定模型请填写供应商与模型名");
       return;
     }
     await withBusy(async () => {
       await callTool("update_job", {
         jobId: editingJobId,
+        title: editTitle.trim() || "未命名任务",
+        prompt: editPrompt.trim(),
+        targetSessionId: editTargetKind === "session" ? editSessionId : null,
         scheduleKind: editKind,
         ...(editKind === "once" ? { runAt: new Date(editRunAt).getTime() } : {}),
         ...(editKind === "daily" || editKind === "weekly"
           ? { timeOfDay: parseClock(editTime) ?? 0 }
           : {}),
         ...(editKind === "weekly" ? { weekdays: editWeekdays } : {}),
+        ...(editModelMode === "follow"
+          ? { followSessionModel: true }
+          : editModelMode === "custom"
+            ? {
+                model: {
+                  providerId: editModelProvider.trim(),
+                  modelId: editModelId.trim(),
+                  reasoningLevel: editReasoningLevel.trim() || "max",
+                },
+              }
+            : { model: DEFAULT_MODEL_FORM }),
       });
       setEditingJobId(null);
     });
-  }, [withBusy, editingJobId, editKind, editRunAt, editTime, editWeekdays]);
+  }, [
+    withBusy,
+    editingJobId,
+    editTitle,
+    editPrompt,
+    editTargetKind,
+    editSessionId,
+    editKind,
+    editRunAt,
+    editTime,
+    editWeekdays,
+    editModelMode,
+    editModelProvider,
+    editModelId,
+    editReasoningLevel,
+  ]);
 
   const sessionOptions = useMemo(
     () =>
@@ -364,6 +470,12 @@ function App_(): JSX.Element {
           <ul className="jobs">
             {jobs.map((job) => {
               const status = jobStatus(job);
+              const editing = editingJobId === job.automationId;
+              // 目标会话可能已被删掉（会话清单里没有它）：编辑时把原目标兜底成选项，避免静默换目标。
+              const editSessionOptions =
+                editing && editSessionId && !sessionOptions.some((option) => option.value === editSessionId)
+                  ? [{ value: editSessionId, label: `原目标 ${editSessionId}` }, ...sessionOptions]
+                  : sessionOptions;
               return (
                 <li key={job.automationId} className="job">
                   <div className="job-row">
@@ -377,8 +489,43 @@ function App_(): JSX.Element {
                     <span>下次 {formatTime(job.nextRunAt)}</span>
                     <span>已执行 {job.runCount} 次</span>
                   </div>                  {job.lastError ? <div className="job-error">{job.lastError}</div> : null}
-                  {editingJobId === job.automationId ? (
+                  {editing ? (
                     <div className="edit-box">
+                      <label>
+                        <span>标题</span>
+                        <input value={editTitle} onChange={(e) => setEditTitle(e.target.value)} />
+                      </label>
+                      <label>
+                        <span>执行目标</span>
+                        <select
+                          value={editTargetKind}
+                          onChange={(e) => setEditTargetKind(e.target.value as "session" | "new-session")}
+                        >
+                          <option value="session">已有会话</option>
+                          <option value="new-session">新建会话</option>
+                        </select>
+                      </label>
+                      {editTargetKind === "session" ? (
+                        <label>
+                          <span>会话</span>
+                          <select value={editSessionId} onChange={(e) => setEditSessionId(e.target.value)}>
+                            <option value="">请选择会话</option>
+                            {editSessionOptions.map((option) => (
+                              <option key={option.value} value={option.value}>
+                                {option.label}
+                              </option>
+                            ))}
+                          </select>
+                        </label>
+                      ) : null}
+                      <label>
+                        <span>任务内容</span>
+                        <textarea
+                          value={editPrompt}
+                          onChange={(e) => setEditPrompt(e.target.value)}
+                          rows={4}
+                        />
+                      </label>
                       <label>
                         <span>重复</span>
                         <select
@@ -412,6 +559,45 @@ function App_(): JSX.Element {
                       {editKind === "weekly" ? (
                         <WeekdayPicker value={editWeekdays} onChange={setEditWeekdays} />
                       ) : null}
+                      <label>
+                        <span>执行模型</span>
+                        <select
+                          value={editModelMode}
+                          onChange={(e) => setEditModelMode(e.target.value as "minimax" | "follow" | "custom")}
+                        >
+                          <option value="minimax">MiniMax M3.1 Flash（默认，全天可用）</option>
+                          <option value="follow">跟随会话当前模型</option>
+                          <option value="custom">指定模型</option>
+                        </select>
+                      </label>
+                      {editModelMode === "custom" ? (
+                        <div className="settings-grid">
+                          <label>
+                            <span>供应商</span>
+                            <input
+                              value={editModelProvider}
+                              onChange={(e) => setEditModelProvider(e.target.value)}
+                              placeholder="account:bigmodel-start-plan"
+                            />
+                          </label>
+                          <label>
+                            <span>模型</span>
+                            <input
+                              value={editModelId}
+                              onChange={(e) => setEditModelId(e.target.value)}
+                              placeholder="GLM-5.3-Flash"
+                            />
+                          </label>
+                          <label>
+                            <span>思考档位</span>
+                            <input
+                              value={editReasoningLevel}
+                              onChange={(e) => setEditReasoningLevel(e.target.value)}
+                              placeholder="max"
+                            />
+                          </label>
+                        </div>
+                      ) : null}
                       <div className="job-actions">
                         <button className="primary" disabled={busy} onClick={() => void saveEdit()}>
                           保存
@@ -435,7 +621,7 @@ function App_(): JSX.Element {
                         立即执行
                       </button>
                       <button className="ghost" disabled={busy} onClick={() => startEdit(job)}>
-                        改期
+                        编辑
                       </button>
                       <button
                         className="ghost"

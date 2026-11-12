@@ -289,6 +289,93 @@ describe("改期与停用", () => {
     expect(disabled?.nextRunAt).toBe(before.next_run_at);
     db.close();
   });
+
+  it("改内容与标题，不动排期", () => {
+    const { path } = makeFixture();
+    const store = new AutomationStore({ tasksIndexPath: path });
+    const job = store.create({
+      title: "旧标题",
+      prompt: "旧内容",
+      targetSessionId: "sess_a",
+      workspaceKey: "/w",
+      workspacePath: "/w",
+      schedule: { kind: "daily", timeOfDay: 30 * 60_000 },
+      enabled: true,
+    });
+    const before = job.nextRunAt;
+    const updated = store.update(job.automationId, {
+      title: "新标题",
+      prompt: "新内容",
+    });
+    expect(updated?.title).toBe("新标题");
+    expect(updated?.prompt).toBe("新内容");
+    expect(updated?.nextRunAt).toBe(before);
+    expect(updated?.targetSessionId).toBe("sess_a");
+  });
+
+  it("换目标会话：undefined 不动，null 表示新建会话", () => {
+    const { path, db } = makeFixture();
+    const store = new AutomationStore({ tasksIndexPath: path });
+    const job = store.create({
+      title: "任务",
+      prompt: "p",
+      targetSessionId: "sess_a",
+      workspaceKey: "/w",
+      workspacePath: "/w",
+      schedule: { kind: "daily", timeOfDay: 0 },
+      enabled: true,
+    });
+    // 未提供 targetSessionId：目标保持原样。
+    const untouched = store.update(job.automationId, { title: "只改标题" });
+    expect(untouched?.targetSessionId).toBe("sess_a");
+    // null：到点新建会话。
+    const switched = store.update(job.automationId, { targetSessionId: null });
+    expect(switched?.targetSessionId).toBeNull();
+    const row = db
+      .prepare("SELECT target_task_id FROM automations WHERE automation_id = ?")
+      .get(job.automationId) as { target_task_id: string | null };
+    expect(row.target_task_id).toBeNull();
+    db.close();
+  });
+
+  it("换执行模型：null 写跟随，显式模型写完整选择，undefined 不动", () => {
+    const { path, db } = makeFixture();
+    const store = new AutomationStore({ tasksIndexPath: path });
+    const job = store.create({
+      title: "任务",
+      prompt: "p",
+      targetSessionId: "sess_a",
+      workspaceKey: "/w",
+      workspacePath: "/w",
+      schedule: { kind: "daily", timeOfDay: 0 },
+      enabled: true,
+      model: { providerId: "account:pkg", modelId: "M-1", reasoningLevel: "high" },
+    });
+    // undefined：模型保持原样。
+    const untouched = store.update(job.automationId, { title: "只改标题" });
+    expect(untouched?.modelSelection).toBe(
+      JSON.stringify({ providerId: "account:pkg", modelId: "M-1", options: { reasoningLevel: "high" } }),
+    );
+    // null：跟随工作区首选（字面量 "null"，不是 SQL NULL）。
+    const follow = store.update(job.automationId, { model: null });
+    expect(follow?.modelSelection).toBe("null");
+    // 显式模型：写完整选择。
+    const explicit = store.update(job.automationId, {
+      model: { providerId: "minimax", modelId: "MiniMax-M3.1-Flash", reasoningLevel: "max" },
+    });
+    expect(explicit?.modelSelection).toBe(
+      JSON.stringify({
+        providerId: "minimax",
+        modelId: "MiniMax-M3.1-Flash",
+        options: { reasoningLevel: "max" },
+      }),
+    );
+    const row = db
+      .prepare("SELECT model_selection FROM automations WHERE automation_id = ?")
+      .get(job.automationId) as { model_selection: string };
+    expect(row.model_selection).toBe(explicit?.modelSelection);
+    db.close();
+  });
 });
 
 describe("立即执行", () => {

@@ -37,7 +37,7 @@ zcode-task-scheduler/
 ├── .zcode-plugin/plugin.json     # 插件清单：skills / commands / mcpServers / ui.surfaces
 ├── src/
 │   ├── automation/                # 桌面端 automations 表读写（唯一执行面）
-│   │   ├── store.ts               # 建任务、改期、停用、立即执行、读运行记录
+│   │   ├── store.ts               # 建任务、编辑（内容/目标/模型/排期）、停用、立即执行、读运行记录
 │   │   └── migrate.ts             # 旧版 state.db 一次性迁移
 │   ├── gate/                      # 投递节流闸（并发上限 + 同会话顺序）
 │   │   ├── gate.ts                # 判定逻辑（纯函数，可单测）

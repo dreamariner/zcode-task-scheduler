@@ -130,6 +130,15 @@ function describeModel(job: Job): string {
   }
 }
 
+/** 选「指定模型」时若供应商/模型还没填，返回 Start Plan 三件套；已填的返回 null 不覆盖。 */
+function startPlanPrefill(
+  provider: string,
+  modelId: string,
+): typeof START_PLAN_MODEL_FORM | null {
+  if (provider.trim() && modelId.trim()) return null;
+  return START_PLAN_MODEL_FORM;
+}
+
 /** 任务状态徽标：优先用桌面端回写的生命周期与在途状态。 */
 function jobStatus(job: Job): { tone: string; text: string } {
   if (!job.enabled) return { tone: "idle", text: "已停用" };
@@ -157,6 +166,13 @@ const WEEKDAY_NAMES = ["日", "一", "二", "三", "四", "五", "六"] as const
 const DEFAULT_MODEL_FORM = {
   providerId: "minimax",
   modelId: "MiniMax-M3.1-Flash",
+  reasoningLevel: "max",
+} as const;
+
+/** Start Plan 套餐模型；面板选「指定模型」时默认预填这三项。 */
+const START_PLAN_MODEL_FORM = {
+  providerId: "account:bigmodel-start-plan",
+  modelId: "GLM-5.3-Flash",
   reasoningLevel: "max",
 } as const;
 
@@ -563,7 +579,18 @@ function App_(): JSX.Element {
                         <span>执行模型</span>
                         <select
                           value={editModelMode}
-                          onChange={(e) => setEditModelMode(e.target.value as "minimax" | "follow" | "custom")}
+                          onChange={(e) => {
+                            const mode = e.target.value as "minimax" | "follow" | "custom";
+                            setEditModelMode(mode);
+                            if (mode === "custom") {
+                              const prefill = startPlanPrefill(editModelProvider, editModelId);
+                              if (prefill) {
+                                setEditModelProvider(prefill.providerId);
+                                setEditModelId(prefill.modelId);
+                                setEditReasoningLevel(prefill.reasoningLevel);
+                              }
+                            }
+                          }}
                         >
                           <option value="minimax">MiniMax M3.1 Flash（默认，全天可用）</option>
                           <option value="follow">跟随会话当前模型</option>
@@ -744,7 +771,18 @@ function App_(): JSX.Element {
           <span>执行模型</span>
           <select
             value={modelMode}
-            onChange={(e) => setModelMode(e.target.value as "minimax" | "follow" | "custom")}
+            onChange={(e) => {
+              const mode = e.target.value as "minimax" | "follow" | "custom";
+              setModelMode(mode);
+              if (mode === "custom") {
+                const prefill = startPlanPrefill(modelProvider, modelId);
+                if (prefill) {
+                  setModelProvider(prefill.providerId);
+                  setModelId(prefill.modelId);
+                  setReasoningLevel(prefill.reasoningLevel);
+                }
+              }
+            }}
           >
             <option value="minimax">MiniMax M3.1 Flash（默认，全天可用）</option>
             <option value="follow">跟随会话当前模型</option>
